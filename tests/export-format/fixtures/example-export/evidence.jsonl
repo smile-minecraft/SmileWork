@@ -1,0 +1,3 @@
+{"actor":"build","evidenceId":"e-artifact-output","kind":"artifact","path":"raw/project/evidence/test-output.txt","summary":"測試輸出檔","workId":"w-task-format"}
+{"actor":"momus","evidenceId":"e-review-format","kind":"review","summary":"獨立審查同意","workId":"w-task-format"}
+{"actor":"build","command":"bun test tests/export-format","evidenceId":"e-tests-format","kind":"test","output":"測試全數通過","summary":"匯出格式測試通過","workId":"w-task-format"}

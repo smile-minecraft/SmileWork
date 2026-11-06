@@ -1,0 +1,7 @@
+{"actor":"arch","eventId":"e-001","kind":"created","sequence":1,"summary":"建立計畫","workId":"w-plan-main"}
+{"actor":"arch","eventId":"e-002","fromStatus":"open","kind":"status_changed","sequence":2,"toStatus":"in_progress","workId":"w-plan-main"}
+{"actor":"arch","eventId":"e-003","fromStatus":"in_progress","kind":"status_changed","resolution":"completed","sequence":3,"toStatus":"done","workId":"w-plan-main"}
+{"actor":"build","eventId":"e-004","kind":"created","sequence":4,"summary":"建立任務","workId":"w-task-format"}
+{"actor":"build","eventId":"e-005","fromStatus":"open","kind":"status_changed","resolution":"completed","sequence":5,"toStatus":"done","workId":"w-task-format"}
+{"actor":"build","eventId":"e-006","kind":"note","sequence":6,"summary":"匯入器依賴格式定案","workId":"w-task-import"}
+{"actor":"build","eventId":"e-007","kind":"note","sequence":7,"summary":"舊資料缺 title，匯出時使用 workId","workId":"w-task-legacy-title"}

@@ -1,0 +1,58 @@
+{
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "format": "smilework-export",
+  "formatVersion": 1,
+  "layout": {
+    "events": {
+      "path": "events.jsonl",
+      "records": 7
+    },
+    "evidence": {
+      "path": "evidence.jsonl",
+      "records": 3
+    },
+    "knowledge": {
+      "entries": 4,
+      "files": 5,
+      "path": "knowledge/"
+    },
+    "manifest": {
+      "path": "manifest.json"
+    },
+    "mapping": {
+      "path": "mapping.jsonl",
+      "records": 16
+    },
+    "raw": {
+      "files": 7,
+      "globalFiles": 2,
+      "path": "raw/",
+      "projectFiles": 5
+    },
+    "signals": {
+      "path": "signals.jsonl",
+      "records": 1
+    },
+    "work": {
+      "path": "work.jsonl",
+      "records": 5
+    }
+  },
+  "producer": {
+    "name": "smilework",
+    "version": "0.1.0"
+  },
+  "source": {
+    "kind": "ultrawork-v3",
+    "layers": [
+      "project",
+      "global"
+    ],
+    "projectId": "fixture-project",
+    "projectPath": "/fixture-placeholder/project",
+    "registryVersion": "4.0"
+  },
+  "warnings": [
+    "LEGACY_TITLE_FALLBACK: w-task-legacy-title"
+  ]
+}

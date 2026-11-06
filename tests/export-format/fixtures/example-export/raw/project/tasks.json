@@ -1,0 +1,48 @@
+{
+  "version": "4.0",
+  "projectId": "fixture-project",
+  "projectPath": "/fixture-placeholder/project",
+  "activeTaskIds": ["t-old-import"],
+  "taskCursor": "t-old-import",
+  "tasks": {
+    "t-old-plan": {
+      "taskId": "t-old-plan",
+      "title": "可攜資料格式",
+      "state": "COMPLETED",
+      "owner": "arch",
+      "priority": "high",
+      "updatedAt": "2026-10-07T18:01:27.274Z"
+    },
+    "t-old-format": {
+      "taskId": "t-old-format",
+      "title": "定義匯出包格式",
+      "state": "COMPLETED",
+      "owner": "build",
+      "priority": "high",
+      "updatedAt": "2026-10-07T18:01:27.284Z"
+    },
+    "t-old-import": {
+      "taskId": "t-old-import",
+      "title": "實作匯入器",
+      "state": "IN_PROGRESS",
+      "owner": "build",
+      "priority": "medium",
+      "updatedAt": "2026-10-07T18:01:27.291Z"
+    },
+    "t-old-cancel": {
+      "taskId": "t-old-cancel",
+      "title": "舊格式相容層",
+      "state": "CANCELLED",
+      "owner": "build",
+      "priority": "low",
+      "updatedAt": "2026-10-07T18:01:27.295Z"
+    },
+    "t-old-legacy": {
+      "taskId": "t-old-legacy",
+      "state": "COMPLETED",
+      "owner": "build",
+      "priority": "low",
+      "updatedAt": "2026-10-07T18:01:27.299Z"
+    }
+  }
+}
