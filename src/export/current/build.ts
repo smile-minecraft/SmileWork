@@ -140,6 +140,14 @@ interface KnowledgeRow {
   work_id: string | null;
 }
 
+interface RenamedKnowledge {
+  layer: Layer;
+  oldId: string;
+  newId: string;
+  currentVersion: number;
+  body: string;
+}
+
 interface VersionRow {
   entry_id: number;
   version: number;
@@ -668,13 +676,39 @@ function signalCode(kind: string): string {
   }
 }
 
+function sanitizeKnowledgeId(value: string): string {
+  let safe = value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-{2,}/g, "-");
+  safe = safe.replace(/^[^A-Za-z0-9]+/, "").replace(/-+$/, "");
+  if (safe === "") safe = `k-${sha256Bytes(Buffer.from(value, "utf8")).slice(0, 12)}`;
+  if (safe.length > 128) {
+    safe = `${safe.slice(0, 100)}-${sha256Bytes(Buffer.from(value, "utf8")).slice(0, 12)}`;
+  }
+  return safe;
+}
+
+function allocateKnowledgeId(
+  oldId: string,
+  layer: Layer,
+  used: Set<string>,
+): string {
+  let candidate = sanitizeKnowledgeId(oldId);
+  if (used.has(candidate)) candidate = sanitizeKnowledgeId(`${layer}-${oldId}`);
+  let suffix = 2;
+  while (used.has(candidate)) {
+    candidate = sanitizeKnowledgeId(`${layer}-${oldId}-${suffix}`);
+    suffix += 1;
+  }
+  used.add(candidate);
+  return candidate;
+}
+
 function buildKnowledge(
   db: Database,
   home: string,
   projectId: string,
   workIds: ReadonlySet<string>,
   warnings: WarningCollector,
-): { entries: KnowledgeInput[]; hasGlobal: boolean } {
+): { entries: KnowledgeInput[]; hasGlobal: boolean; renamed: RenamedKnowledge[] } {
   const rows = db
     .query<KnowledgeRow, [string]>(
       `SELECT id, knowledge_id, layer, kind, type, title, description, pinned, source,
@@ -683,17 +717,19 @@ function buildKnowledge(
         WHERE ((layer = 'project' AND project_id = ?) OR (layer = 'global' AND project_id IS NULL))
         ORDER BY knowledge_id, layer`,
     )
-    .all(projectId);
+    .all(projectId)
+    .sort((left, right) => {
+      const idOrder = compareCodePoints(left.knowledge_id, right.knowledge_id);
+      if (idOrder !== 0) return idOrder;
+      return (left.layer === "project" ? 0 : 1) - (right.layer === "project" ? 0 : 1);
+    });
 
   const entries: KnowledgeInput[] = [];
-  const seenIds = new Set<string>();
+  const usedIds = new Set<string>();
+  const renamed: RenamedKnowledge[] = [];
   let hasGlobal = false;
   for (const row of rows) {
     if (row.layer === "global") hasGlobal = true;
-    if (!KNOWLEDGE_ID.test(row.knowledge_id) || seenIds.has(row.knowledge_id)) {
-      warnings.add(`DATABASE_KNOWLEDGE_ID_INVALID ${row.knowledge_id}`);
-      continue;
-    }
     if (row.status === "retired") {
       warnings.add(
         `RETIRED_KNOWLEDGE_STATUS_LOST ${row.knowledge_id}：v1 沒有 status 欄位，匯出後會變成 active`,
@@ -708,8 +744,6 @@ function buildKnowledge(
       warnings.add(`DATABASE_KNOWLEDGE_TYPE_INVALID ${row.knowledge_id}`);
       continue;
     }
-    seenIds.add(row.knowledge_id);
-
     const versions = db
       .query<VersionRow, [number]>(
         `SELECT entry_id, version, sha256, bytes, snapshot_path
@@ -717,7 +751,11 @@ function buildKnowledge(
       )
       .all(row.id);
     const bodies: KnowledgeVersionBody[] = [];
-    const versionEntries: KnowledgeRecord["versions"] = [];
+    const loadedVersions: Array<{
+      version: number;
+      sha256: string;
+      bytes: number;
+    }> = [];
     for (const version of versions) {
       if (version.version < 1) {
         warnings.add(`KNOWLEDGE_VERSION_INVALID ${row.knowledge_id} v${version.version}`);
@@ -737,9 +775,8 @@ function buildKnowledge(
       }
       const body = bytes.toString("utf8");
       bodies.push({ version: version.version, body });
-      versionEntries.push({
+      loadedVersions.push({
         version: version.version,
-        path: `knowledge/files/${row.knowledge_id}/v${version.version}.md`,
         sha256: sha,
         bytes: bytes.byteLength,
       });
@@ -748,6 +785,26 @@ function buildKnowledge(
       warnings.add(`KNOWLEDGE_NO_VERSIONS ${row.knowledge_id}`);
       continue;
     }
+
+    let effectiveId = row.knowledge_id;
+    const needsAllocation =
+      !KNOWLEDGE_ID.test(effectiveId) ||
+      effectiveId.length > 128 ||
+      usedIds.has(effectiveId);
+    if (!needsAllocation) {
+      usedIds.add(effectiveId);
+    } else {
+      effectiveId = allocateKnowledgeId(row.knowledge_id, layer, usedIds);
+      warnings.add(
+        `DATABASE_KNOWLEDGE_ID_ALLOCATED ${row.knowledge_id} -> ${effectiveId}`,
+      );
+    }
+    const versionEntries: KnowledgeRecord["versions"] = loadedVersions.map((version) => ({
+      version: version.version,
+      path: `knowledge/files/${effectiveId}/v${version.version}.md`,
+      sha256: version.sha256,
+      bytes: version.bytes,
+    }));
     const currentVersion = versionEntries.some(
       (version) => version.version === row.current_version,
     )
@@ -758,10 +815,10 @@ function buildKnowledge(
     }
 
     const record: KnowledgeRecord = {
-      knowledgeId: row.knowledge_id,
+      knowledgeId: effectiveId,
       type,
       layer,
-      title: row.title === "" ? row.knowledge_id : row.title,
+      title: row.title === "" ? effectiveId : row.title,
       description: row.description,
       pinned: row.pinned === 1,
       source: row.source === "" ? "unknown" : row.source,
@@ -772,8 +829,21 @@ function buildKnowledge(
     const tags = parseStringArray(row.tags, `knowledge_entries.tags ${row.knowledge_id}`, warnings);
     if (tags.length > 0) record.tags = uniqueSorted(tags);
     entries.push({ record, versions: bodies });
+
+    if (needsAllocation) {
+      const currentBody = bodies.find((body) => body.version === currentVersion);
+      if (currentBody !== undefined) {
+        renamed.push({
+          layer,
+          oldId: row.knowledge_id,
+          newId: effectiveId,
+          currentVersion,
+          body: currentBody.body,
+        });
+      }
+    }
   }
-  return { entries, hasGlobal };
+  return { entries, hasGlobal, renamed };
 }
 
 function stripProjectPrefix(projectId: string, sourceId: string): string {
@@ -845,6 +915,83 @@ function buildRawAndRawMappings(
   return { raw, mapping };
 }
 
+function safeMappingSourceId(value: string): string {
+  const segments = value.split("/");
+  if (
+    value !== "" &&
+    value.length <= 512 &&
+    !value.startsWith("/") &&
+    segments.every((segment) => segment !== "..")
+  ) {
+    return value;
+  }
+  return sanitizeKnowledgeId(value);
+}
+
+function createKnowledgeMigration(
+  renamed: readonly RenamedKnowledge[],
+  existingRaw: readonly RawOutput[],
+): {
+  raw: RawOutput[];
+  rawMapping: MappingRecord[];
+  rawPathByNewId: Map<string, string>;
+} {
+  const usedPaths = new Set(existingRaw.map((file) => `${file.layer}/${file.path}`));
+  const raw: RawOutput[] = [];
+  const rawMapping: MappingRecord[] = [];
+  const rawPathByNewId = new Map<string, string>();
+  for (const entry of renamed) {
+    let path = `knowledge-ids/${entry.newId}/v${entry.currentVersion}.md`;
+    let suffix = 2;
+    while (usedPaths.has(`${entry.layer}/${path}`)) {
+      path = `knowledge-ids/${entry.newId}/v${entry.currentVersion}-${suffix}.md`;
+      suffix += 1;
+    }
+    usedPaths.add(`${entry.layer}/${path}`);
+    const bytes = Buffer.from(entry.body, "utf8");
+    const sha = sha256Bytes(bytes);
+    const packagePath = `raw/${entry.layer}/${path}`;
+    raw.push({ layer: entry.layer, path, bytes });
+    rawMapping.push({
+      entity: "raw",
+      layer: entry.layer,
+      sourceRoot: entry.layer === "project" ? "raw/project" : "raw/global",
+      sourceId: path,
+      targetId: packagePath,
+      sourceRef: packagePath,
+      sha256: sha,
+      note: "知識 ID 配置的來源副本",
+    });
+    rawPathByNewId.set(`${entry.layer}\u0000${entry.newId}`, packagePath);
+  }
+  return { raw, rawMapping, rawPathByNewId };
+}
+
+function createKnowledgeIdMappings(
+  renamed: readonly RenamedKnowledge[],
+  rawPathByNewId: ReadonlyMap<string, string>,
+): MappingRecord[] {
+  const mapping: MappingRecord[] = [];
+  for (const entry of renamed) {
+    const sourceRef = rawPathByNewId.get(`${entry.layer}\u0000${entry.newId}`);
+    if (sourceRef === undefined) continue;
+    const sourceId = safeMappingSourceId(entry.oldId);
+    mapping.push({
+      entity: "knowledge",
+      layer: entry.layer,
+      sourceRoot: entry.layer === "project" ? "raw/project" : "raw/global",
+      sourceId,
+      sourceRecord: "body",
+      targetId: entry.newId,
+      sourceRef,
+      ...(sourceId === entry.oldId
+        ? {}
+        : { note: `原始 ID：${entry.oldId}`.slice(0, 2000) }),
+    });
+  }
+  return mapping;
+}
+
 function buildNonRawMappings(
   db: Database,
   projectId: string,
@@ -856,6 +1003,7 @@ function buildNonRawMappings(
     knowledge: ReadonlyMap<string, Layer>;
   },
   pathSet: ReadonlySet<string>,
+  skipKnowledgeTargets: ReadonlySet<string>,
   warnings: WarningCollector,
 ): MappingRecord[] {
   const rows = db
@@ -885,6 +1033,7 @@ function buildNonRawMappings(
       continue;
     }
     if (row.entity === "knowledge") {
+      if (skipKnowledgeTargets.has(`${row.layer}\u0000${row.target_id}`)) continue;
       if (ids.knowledge.get(row.target_id) !== row.layer) {
         warnings.add(`DATABASE_MAPPING_TARGET_MISSING ${row.source_id}`);
         continue;
@@ -943,9 +1092,11 @@ export function buildCurrentPackage(
     workIds,
     warnings,
   );
+  const migration = createKnowledgeMigration(knowledgeBuild.renamed, rawBuild.raw);
+  const rawFiles = [...rawBuild.raw, ...migration.raw];
 
   const pathSet = new Set<string>([
-    ...rawBuild.raw.map((file) => `raw/${file.layer}/${file.path}`),
+    ...rawFiles.map((file) => `raw/${file.layer}/${file.path}`),
     ...knowledgeBuild.entries.flatMap((entry) =>
       entry.record.versions.map((version) => version.path),
     ),
@@ -965,13 +1116,25 @@ export function buildCurrentPackage(
     ),
   };
 
+  const skipKnowledgeTargets = new Set(
+    knowledgeBuild.renamed.map((entry) => `${entry.layer}\u0000${entry.oldId}`),
+  );
   const mapping = [
     ...rawBuild.mapping,
-    ...buildNonRawMappings(db, options.projectId, ids, pathSet, warnings),
+    ...migration.rawMapping,
+    ...buildNonRawMappings(
+      db,
+      options.projectId,
+      ids,
+      pathSet,
+      skipKnowledgeTargets,
+      warnings,
+    ),
+    ...createKnowledgeIdMappings(knowledgeBuild.renamed, migration.rawPathByNewId),
   ].sort(compareMappings);
 
   const layers: Layer[] = ["project"];
-  if (knowledgeBuild.hasGlobal || rawBuild.raw.some((file) => file.layer === "global") || signalBuild.hasGlobal) {
+  if (knowledgeBuild.hasGlobal || rawFiles.some((file) => file.layer === "global") || signalBuild.hasGlobal) {
     layers.push("global");
   }
   for (const record of mapping) {
@@ -998,9 +1161,9 @@ export function buildCurrentPackage(
       mapping: { path: "mapping.jsonl", records: mapping.length },
       raw: {
         path: "raw/",
-        files: rawBuild.raw.length,
-        projectFiles: rawBuild.raw.filter((file) => file.layer === "project").length,
-        globalFiles: rawBuild.raw.filter((file) => file.layer === "global").length,
+        files: rawFiles.length,
+        projectFiles: rawFiles.filter((file) => file.layer === "project").length,
+        globalFiles: rawFiles.filter((file) => file.layer === "global").length,
       },
     },
     warnings: warnings.all(),
@@ -1014,6 +1177,6 @@ export function buildCurrentPackage(
     signals: signalBuild.records,
     knowledge: knowledgeBuild.entries,
     mapping,
-    raw: rawBuild.raw,
+    raw: rawFiles,
   };
 }
