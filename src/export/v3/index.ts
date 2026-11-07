@@ -12,7 +12,7 @@ import { writePackage } from "./write.ts";
  * producer 版本。`package.json` 的版本是正式來源，測試會比對兩者；
  * 這裡用常數是為了讓打包後的 CLI 不必依賴執行時的工作目錄。
  */
-export const PRODUCER_VERSION = "0.1.0";
+export const PRODUCER_VERSION = "0.1.1";
 
 export interface ExportV3Options {
   /** 專案根目錄，或直接指向 `.ultrawork/`。 */

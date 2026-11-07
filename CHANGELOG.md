@@ -1,5 +1,18 @@
 # 變更紀錄
 
+## 0.1.1 - 2026-11-07
+
+發佈流程改由 GitHub Actions 執行。這個版本沒有功能變更。
+
+### 修正
+
+- npm 頁面的 README 更新為目前的安裝說明與預設 `worker` profile。
+
+### 變更
+
+- 新增 tag 觸發的發佈 workflow，以 npm Trusted Publishing（OIDC）發佈並產生 provenance。
+- `package.json` 加入 `publishConfig.access: public`。
+
 ## 0.1.0 - 2026-11-07
 
 第一版。已發佈到 npm（`smilework@0.1.0`）與 GitHub Release（`v0.1.0`）。

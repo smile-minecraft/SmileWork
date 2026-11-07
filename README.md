@@ -2,7 +2,7 @@
 
 SmileWork 是跨代理共用的本機 MCP 伺服器。它透過 stdio 連上 Claude Code、OpenCode、Codex 等宿主，讓同一個專案的工作、證據、知識與對話索引由同一份資料庫管理。資料保存在 `~/.smilework/`，伺服器本身不呼叫 LLM，也不連網。
 
-目前版本是 0.1.0，已發佈到 npm。用 `bun add -g smilework` 安裝後執行 `smilework`，也可以從原始碼執行。
+目前版本是 0.1.1，已發佈到 npm。用 `bun add -g smilework` 安裝後執行 `smilework`，也可以從原始碼執行。
 
 ## 提供什麼
 

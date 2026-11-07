@@ -1,6 +1,6 @@
 {
   "name": "smilework",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "跨代理共用的本機 MCP 伺服器，管理任務、證據與知識",
   "license": "MIT",
   "author": "Smile <Jay950618@gmail.com>",
@@ -51,5 +51,8 @@
   },
   "engines": {
     "bun": ">=1.3.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
