@@ -2,7 +2,7 @@
 
 SmileWork 是跨代理共用的本機 MCP 伺服器。它透過 stdio 連上 Claude Code、OpenCode、Codex 等宿主，讓同一個專案的工作、證據、知識與對話索引由同一份資料庫管理。資料保存在 `~/.smilework/`，伺服器本身不呼叫 LLM，也不連網。
 
-目前版本是 0.1.0，尚未發佈到 npm。請從原始碼執行。
+目前版本是 0.1.0，已發佈到 npm。用 `bun add -g smilework` 安裝後執行 `smilework`，也可以從原始碼執行。
 
 ## 提供什麼
 
@@ -22,6 +22,15 @@ SmileWork 是跨代理共用的本機 MCP 伺服器。它透過 stdio 連上 Cla
 - 一個 git 專案（工作會綁定專案根目錄）
 
 ## 安裝與檢查
+
+從 npm 全域安裝：
+
+```sh
+bun add -g smilework
+smilework --help
+```
+
+從原始碼開發時：
 
 ```sh
 bun install
@@ -54,7 +63,7 @@ export SMILEWORK_MODEL=my-model
 export SMILEWORK_PROFILE=worker
 ```
 
-`SMILEWORK_ACTOR` 與 `SMILEWORK_MODEL` 會寫進工作、證據與事件紀錄。`SMILEWORK_PROFILE` 選擇工具清單；未設定時預設 `full`。`SMILEWORK_PROJECT` 可以指定專案根目錄，省略時從程序的工作目錄往上找 git 根目錄。
+`SMILEWORK_ACTOR` 與 `SMILEWORK_MODEL` 會寫進工作、證據與事件紀錄。`SMILEWORK_PROFILE` 選擇工具清單；未設定時預設 `worker`。`SMILEWORK_PROJECT` 可以指定專案根目錄，省略時從程序的工作目錄往上找 git 根目錄。
 
 ### 設定範例
 
@@ -187,5 +196,4 @@ bun run build
 
 - 只提供 stdio 傳輸，沒有 HTTP 常駐程式。
 - 三個 profile 的工具數量固定為 12、15、21；專案層設定只能停用工具，不能改 profile。
-- 尚未發佈 npm、建立 tag 或 GitHub release。
 - 不做雲端同步，也不在伺服器內呼叫 LLM。

@@ -2,7 +2,7 @@
 
 ## 0.1.0 - 2026-11-07
 
-第一版。
+第一版。已發佈到 npm（`smilework@0.1.0`）與 GitHub Release（`v0.1.0`）。
 
 ### 新增
 
@@ -22,5 +22,4 @@
 ### 已知限制
 
 - 只提供 stdio 傳輸，沒有 HTTP 常駐程式。
-- 尚未發佈 npm、建立 git tag 或 GitHub release。
 - 不在伺服器內呼叫 LLM，也不做雲端同步。

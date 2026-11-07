@@ -12,14 +12,14 @@ SmileWork 是一個以 stdio 連線的 MCP 伺服器。宿主啟動伺服器程�
 bun /Users/you/src/SmileWork/src/cli/index.ts mcp
 ```
 
-套件安裝後，同一個入口是 `smilework mcp`。目前版本尚未發佈到 npm，文件一律使用原始碼路徑。
+套件已發佈到 npm，安裝後同一個入口是 `smilework mcp`。以下範例使用原始碼路徑；改用套件時，把 `bun /Users/you/src/SmileWork/src/cli/index.ts mcp` 換成 `smilework mcp`。
 
 ### 環境變數
 
 | 變數 | 必填 | 說明 |
 | --- | --- | --- |
 | `SMILEWORK_HOME` | 否 | 資料目錄，預設 `~/.smilework`。測試或分開的專案群組可以指向不同位置。 |
-| `SMILEWORK_PROFILE` | 否 | `worker`、`curator` 或 `full`。未設定時預設 `full`；環境變數優先於全域設定。 |
+| `SMILEWORK_PROFILE` | 否 | `worker`、`curator` 或 `full`。未設定時預設 `worker`；環境變數優先於全域設定。 |
 | `SMILEWORK_PROJECT` | 否 | 專案根目錄。省略時從程序的工作目錄往上找 git 根目錄。 |
 | `SMILEWORK_ACTOR` | 建議 | 操作者名稱，會寫進工作、審查與事件紀錄。未設定時記為 `unknown`。 |
 | `SMILEWORK_MODEL` | 建議 | 模型名稱，和 actor 一起記在證據與事件裡。 |
