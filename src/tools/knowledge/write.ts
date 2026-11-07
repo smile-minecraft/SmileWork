@@ -373,11 +373,12 @@ export const tool = defineTool({
               projectPath ?? undefined,
             );
             if (existingLocations.length > 0) {
-              throw new SmileworkError(
-                "KNOWLEDGE_TARGET_EXISTS",
+              throw invalidKnowledgeInput(
                 `專案技能 ${parsed.knowledgeId} 已經存在於其他 worktree，不能再建立第二份。`,
                 "先確認哪個 worktree 的既有技能是正確來源；移除重複資料夾，或改用更新既有項目的方式。",
                 {
+                  field: "files",
+                  path: existingLocations[0]?.artifactPath,
                   knowledgeId: parsed.knowledgeId,
                   projectId,
                   worktrees: existingLocations.map((location) => location.worktreePath),
@@ -399,6 +400,7 @@ export const tool = defineTool({
             ...(parsed.kind === "memory" ? { memory: memoryMetadata(entry) } : {}),
             mode: createdEntry ? "create" : "update",
             pruneStaleFiles: !createdEntry && filesProvided,
+            preflightTargets: true,
           });
 
           return {

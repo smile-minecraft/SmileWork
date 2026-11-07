@@ -7,9 +7,10 @@ import {
   renameSync,
   rmdirSync,
   rmSync,
+  statSync,
   unlinkSync,
 } from "node:fs";
-import { dirname, extname, join, relative } from "node:path";
+import { dirname, extname, isAbsolute, join, relative } from "node:path";
 import type { KnowledgeEntry, KnowledgeKind, KnowledgeLayer, KnowledgeType } from "../../domain/knowledge.ts";
 import { atomicWriteFile } from "../../shared/atomic-write.ts";
 import { assertPathAllowed, guardRoots } from "../../shared/path-guard.ts";
@@ -57,6 +58,8 @@ export interface MaterializeKnowledgeInput {
   mode: "create" | "update";
   /** 明確要求附件以這次 files 為完整集合時，才刪除未列出的舊附檔。 */
   pruneStaleFiles?: boolean;
+  /** 預設開啟完整 target 預檢；只有明確 false 才跳過（目前沒有呼叫端使用）。 */
+  preflightTargets?: boolean;
 }
 
 export interface MaterializedFile {
@@ -171,13 +174,238 @@ function assertNoSymlinkComponents(root: string, target: string): void {
   }
 }
 
+/** 檔案系統的單一檔名上限；用 UTF-8 位元組計算，避免寫入後才失敗。 */
+const MAX_FILENAME_BYTES = 255;
+
+interface WriteTarget {
+  relativePath: string;
+  absolutePath: string;
+  field: string;
+  content: string;
+}
+
+function toPosixRelative(root: string, target: string): string {
+  return relative(root, target).split(/[\\/]/).join("/");
+}
+
+function invalidWriteTarget(
+  field: string,
+  path: string,
+  message: string,
+  nextAction: string,
+): never {
+  throw invalidKnowledgeInput(message, nextAction, { field, path });
+}
+
+/** 找到最近的既有祖先，確認它是目錄；root 不存在時用來確認可以建立。 */
+function assertAncestorDirectory(root: string, field: string): void {
+  let current = root;
+  for (;;) {
+    try {
+      const info = statSync(current);
+      if (!info.isDirectory()) {
+        invalidWriteTarget(
+          field,
+          root,
+          `知識路徑的父層不是目錄：${current}`,
+          "確認上層路徑是實體目錄，而不是檔案或 symlink。",
+        );
+      }
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        const parent = dirname(current);
+        if (parent === current) {
+          invalidWriteTarget(
+            field,
+            root,
+            `找不到可以建立知識路徑的父層：${root}`,
+            "確認知識根目錄的上層存在且是目錄。",
+          );
+        }
+        current = parent;
+        continue;
+      }
+      if (error instanceof SmileworkError) throw error;
+      invalidWriteTarget(
+        field,
+        root,
+        `無法檢查知識路徑的父層：${current}`,
+        "確認路徑權限後再寫入。",
+      );
+    }
+  }
+}
+
+/**
+ * 在寫入任何檔案前檢查所有 target：
+ * - root 必須是實體目錄，或它的最近既有祖先必須是目錄
+ * - 每個路徑元件不能是 symlink
+ * - 中間元件必須是目錄；目標不能是既有目錄
+ * - 目標只能是檔案或不存在；檔名長度不能超過檔案系統上限
+ * - 任何 target 不能同時被當成另一個 target 的父目錄
+ */
+function preflightWriteTargets(
+  root: string,
+  targets: readonly WriteTarget[],
+  context: WriteContext,
+): void {
+  try {
+    const rootInfo = lstatSync(root);
+    if (rootInfo.isSymbolicLink()) {
+      invalidWriteTarget("files", root, `知識根目錄是 symlink：${root}`, "改用實體目錄後再寫入。");
+    }
+    if (!rootInfo.isDirectory()) {
+      invalidWriteTarget("files", root, `知識根目錄不是目錄：${root}`, "改用實體目錄後再寫入。");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      assertAncestorDirectory(root, "files");
+    } else if (error instanceof SmileworkError) {
+      throw error;
+    } else {
+      invalidWriteTarget(
+        "files",
+        root,
+        `無法檢查知識根目錄：${root}`,
+        "確認路徑權限後再寫入。",
+      );
+    }
+  }
+
+  const byPath = new Map(targets.map((target) => [target.relativePath, target]));
+
+  for (const target of targets) {
+    const relativePath = target.relativePath;
+    if (
+      relativePath.length === 0 ||
+      relativePath === "." ||
+      relativePath.startsWith("../") ||
+      isAbsolute(relativePath)
+    ) {
+      invalidWriteTarget(
+        target.field,
+        relativePath,
+        `附檔目標不是有效的相對路徑：${relativePath}`,
+        "改用根目錄以下的檔案路徑。",
+      );
+    }
+
+    const segments = relativePath.split("/").filter(Boolean);
+    if (segments.length === 0) {
+      invalidWriteTarget(
+        target.field,
+        relativePath,
+        `附檔目標沒有檔名：${relativePath}`,
+        "提供指向檔案的相對路徑。",
+      );
+    }
+
+    let current = root;
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index]!;
+      if (Buffer.byteLength(segment, "utf8") > MAX_FILENAME_BYTES) {
+        invalidWriteTarget(
+          target.field,
+          relativePath,
+          `檔名超過 ${MAX_FILENAME_BYTES} bytes：${segment}`,
+          "縮短檔名後再寫入。",
+        );
+      }
+
+      current = join(current, segment);
+      const last = index === segments.length - 1;
+      let info;
+      try {
+        info = lstatSync(current);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        invalidWriteTarget(
+          target.field,
+          relativePath,
+          `無法檢查附檔路徑元件：${current}`,
+          "確認路徑權限後再寫入。",
+        );
+      }
+
+      if (info.isSymbolicLink()) {
+        invalidWriteTarget(
+          target.field,
+          relativePath,
+          `附檔路徑元件是 symlink：${current}`,
+          "移除 symlink，或改用實體目錄後再寫入。",
+        );
+      }
+
+      if (!last) {
+        if (!info.isDirectory()) {
+          invalidWriteTarget(
+            target.field,
+            relativePath,
+            `附檔目標的父層不是目錄：${current}`,
+            "把父層改成目錄，或改用其他檔名。",
+          );
+        }
+        continue;
+      }
+
+      if (info.isDirectory()) {
+        invalidWriteTarget(
+          target.field,
+          relativePath,
+          `附檔目標與既有目錄同名：${relativePath}`,
+          "改用其他檔名；目標不能是既有目錄。",
+        );
+      }
+      if (!info.isFile()) {
+        invalidWriteTarget(
+          target.field,
+          relativePath,
+          `附檔目標不是一般檔案：${relativePath}`,
+          "改用一般檔案路徑。",
+        );
+      }
+    }
+
+    try {
+      assertPathAllowed(target.absolutePath, context.roots, { label: "知識檔案" });
+    } catch (error) {
+      if (error instanceof SmileworkError) {
+        invalidWriteTarget(
+          target.field,
+          relativePath,
+          error.message,
+          "改用允許的知識路徑，並確認路徑中沒有指向範圍外的 symlink。",
+        );
+      }
+      throw error;
+    }
+  }
+
+  for (const target of targets) {
+    const parts = target.relativePath.split("/").filter(Boolean);
+    let parent = "";
+    for (let index = 0; index < parts.length - 1; index += 1) {
+      parent = parent.length === 0 ? parts[index]! : `${parent}/${parts[index]!}`;
+      const parentTarget = byPath.get(parent);
+      if (parentTarget) {
+        invalidWriteTarget(
+          parentTarget.field,
+          parentTarget.relativePath,
+          `同一個路徑同時被當成檔案與目錄：${parent}`,
+          "把其中一個路徑改成不同名稱，或移除衝突的附檔。",
+        );
+      }
+    }
+  }
+}
+
 function assertCreateTargetFree(path: string, label: string): void {
   if (!existsSync(path)) return;
-  throw new SmileworkError(
-    KNOWLEDGE_TOOL_ERROR_CODES.targetExists,
+  throw invalidKnowledgeInput(
     `${label}已經存在：${path}`,
     "換一個名稱，或先確認既有檔案是不是同一個知識項目；更新時請帶 expectedVersion。",
-    { path },
+    { field: "files", path },
   );
 }
 
@@ -255,7 +483,6 @@ function materializeSkill(input: MaterializeKnowledgeInput, context: WriteContex
     input.layer,
     input.knowledgeId,
   );
-  assertPathAllowed(root, context.roots, { label: "技能資料夾" });
   if (input.mode === "create") assertCreateTargetFree(root, "技能資料夾");
 
   const createdRoot = !existsSync(root);
@@ -266,20 +493,27 @@ function materializeSkill(input: MaterializeKnowledgeInput, context: WriteContex
     });
   }
 
-  const files: MaterializedFile[] = [];
-  const targets = [
-    { path: "SKILL.md", content: input.content },
-    ...auxFiles,
+  const targets: WriteTarget[] = [
+    {
+      relativePath: "SKILL.md",
+      absolutePath: join(root, "SKILL.md"),
+      field: "files",
+      content: input.content,
+    },
+    ...auxFiles.map((file, index) => ({
+      relativePath: file.path,
+      absolutePath: join(root, file.path),
+      field: `files[${index}].path`,
+      content: file.content,
+    })),
   ];
-  for (const target of targets) {
-    const absolutePath = join(root, target.path);
-    assertNoSymlinkComponents(root, absolutePath);
-    assertPathAllowed(absolutePath, context.roots, { label: "技能附檔" });
+  if (input.preflightTargets !== false) {
+    preflightWriteTargets(root, targets, context);
   }
 
-  for (const target of targets) {
-    files.push(writeTextFile(join(root, target.path), target.content, root, context));
-  }
+  const files: MaterializedFile[] = targets.map((target) =>
+    writeTextFile(target.absolutePath, target.content, root, context),
+  );
 
   if (input.mode === "update" && input.pruneStaleFiles === true) {
     pruneSkillAttachments(
@@ -305,7 +539,6 @@ function materializeMemory(input: MaterializeKnowledgeInput, context: WriteConte
     input.projectId,
     input.knowledgeId,
   );
-  assertPathAllowed(topicPath, context.roots, { label: "記憶檔案" });
   if (input.mode === "create") assertCreateTargetFree(topicPath, "記憶檔案");
 
   const auxFiles = normalizeAuxFiles(input.files);
@@ -318,22 +551,37 @@ function materializeMemory(input: MaterializeKnowledgeInput, context: WriteConte
           input.knowledgeId,
         )
       : null;
-  if (filesRoot !== null) {
-    assertPathAllowed(filesRoot, context.roots, { label: "記憶附檔資料夾" });
-    if (input.mode === "create") assertCreateTargetFree(filesRoot, "記憶附檔資料夾");
-    for (const file of auxFiles) {
-      const target = join(filesRoot, file.path);
-      assertNoSymlinkComponents(root, target);
-      assertPathAllowed(target, context.roots, { label: "記憶附檔" });
-    }
+  if (filesRoot !== null && input.mode === "create") {
+    assertCreateTargetFree(filesRoot, "記憶附檔資料夾");
   }
 
   const document = formatMemoryDocument({ ...input.memory, content: input.content });
-  assertNoSymlinkComponents(root, topicPath);
+  const targets: WriteTarget[] = [
+    {
+      relativePath: toPosixRelative(root, topicPath),
+      absolutePath: topicPath,
+      field: "files",
+      content: document,
+    },
+  ];
+  if (filesRoot !== null) {
+    auxFiles.forEach((file, index) => {
+      const absolutePath = join(filesRoot, file.path);
+      targets.push({
+        relativePath: toPosixRelative(root, absolutePath),
+        absolutePath,
+        field: `files[${index}].path`,
+        content: file.content,
+      });
+    });
+  }
+  if (input.preflightTargets !== false) {
+    preflightWriteTargets(root, targets, context);
+  }
+
   const files: MaterializedFile[] = [
     writeTextFile(topicPath, document, dirname(topicPath), context),
   ];
-
   if (filesRoot !== null) {
     for (const file of auxFiles) {
       files.push(writeTextFile(join(filesRoot, file.path), file.content, filesRoot, context));
