@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -291,7 +292,7 @@ describe("knowledge_revert 同步落地檔", () => {
     });
   });
 
-  test("落地檔寫入失敗時回滾資料庫，不留下新版本", async () => {
+  test("落地路徑被既有目錄佔用時，預檢回 VALIDATION_ERROR，DB 不建立新版本", async () => {
     await withKnowledgeFixture(async (fixture) => {
       const entry = createMemory(fixture, memoryV1);
       updateMemory(fixture, entry.id, memoryV2);
@@ -307,7 +308,8 @@ describe("knowledge_revert 同步落地檔", () => {
           fixture,
         ),
       );
-      expect(failure.code).toBe("INTERNAL_ERROR");
+      expect(failure.code).toBe("VALIDATION_ERROR");
+      expect(failure.data.field).toBe("files");
 
       const { entry: found, versions } = withDatabase(fixture, (db) => ({
         entry: findKnowledgeEntry(db, "landing-memory", "global", null)!,
@@ -316,9 +318,56 @@ describe("knowledge_revert 同步落地檔", () => {
       expect(found.currentVersion).toBe(2);
       expect(versions.map((version) => version.version)).toEqual([1, 2]);
       expect(readVersionContent(fixture, entry.id, 2)).toBe(memoryV2);
+
+      expect(existsSync(path)).toBe(true);
+      expect(readdirSync(path)).toEqual(["blocks-rename.txt"]);
+      expect(readFileSync(join(path, "blocks-rename.txt"), "utf8")).toBe("x");
       expect(
         readdirSync(dirname(path)).filter((name) => name.endsWith(".tmp")),
       ).toEqual([]);
+    });
+  });
+
+  test("落地檔真正寫入失敗時回滾資料庫，不留下新版本", async () => {
+    if (
+      process.platform === "win32" ||
+      (typeof process.getuid === "function" && process.getuid() === 0)
+    ) {
+      return;
+    }
+
+    await withKnowledgeFixture(async (fixture) => {
+      const entry = createMemory(fixture, memoryV1);
+      updateMemory(fixture, entry.id, memoryV2);
+      const path = memoryPath(fixture);
+      const topicsDirectory = dirname(path);
+      const before = readFileSync(path);
+
+      chmodSync(topicsDirectory, 0o555);
+      try {
+        const failure = failureOf(
+          await callTool(
+            knowledgeRevert,
+            { knowledgeId: "landing-memory", layer: "global", version: 1 },
+            fixture,
+          ),
+        );
+        expect(failure.code).toBe("INTERNAL_ERROR");
+
+        const { entry: found, versions } = withDatabase(fixture, (db) => ({
+          entry: findKnowledgeEntry(db, "landing-memory", "global", null)!,
+          versions: listKnowledgeVersions(db, entry.id),
+        }));
+        expect(found.currentVersion).toBe(2);
+        expect(versions.map((version) => version.version)).toEqual([1, 2]);
+        expect(readVersionContent(fixture, entry.id, 2)).toBe(memoryV2);
+        expect(Buffer.compare(readFileSync(path), before)).toBe(0);
+        expect(
+          readdirSync(topicsDirectory).filter((name) => name.endsWith(".tmp")),
+        ).toEqual([]);
+      } finally {
+        chmodSync(topicsDirectory, 0o755);
+      }
     });
   });
 });

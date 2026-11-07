@@ -229,7 +229,7 @@ export function dataOf<T>(result: ToolResult): T {
   return (result as ToolSuccess<T>).data;
 }
 
-export function failureOf(result: ToolResult): { code: string; message: string } {
+export function failureOf(result: ToolResult): { code: string; message: string; data: Record<string, unknown> } {
   if (result.ok) throw new Error("預期工具回傳失敗，但得到成功結果。");
-  return { code: result.code, message: result.message };
+  return { code: result.code, message: result.message, data: result.data };
 }
