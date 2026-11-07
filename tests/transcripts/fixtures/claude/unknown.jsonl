@@ -1,0 +1,4 @@
+{"type":"user","message":{"role":"user","content":"unknown format still keeps this message"},"cwd":"/work/alpha","sessionId":"claude-unknown-1","timestamp":"2026-11-01T11:00:00.000Z","uuid":"u1"}
+this is not json
+{"type":"mystery","foo":1}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"the next valid entry"}]},"cwd":"/work/alpha","sessionId":"claude-unknown-1","timestamp":"2026-11-01T11:00:01.000Z","uuid":"a1"}

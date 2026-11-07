@@ -1,0 +1,7 @@
+{"timestamp":"2026-11-02T09:00:00.000Z","type":"session_meta","payload":{"id":"codex-fixture-1","timestamp":"2026-11-02T09:00:00.000Z","cwd":"/work/beta","originator":"codex_cli_rs","cli_version":"0.0.0-fixture"}}
+{"timestamp":"2026-11-02T09:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Find the flaky test in the parser."}]}}
+{"timestamp":"2026-11-02T09:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I found the flaky parser test."}]}}
+{"timestamp":"2026-11-02T09:00:03.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call-fixture-1","arguments":"{\"command\":[\"bun\",\"test\",\"tests/parser\"]}"}}
+{"timestamp":"2026-11-02T09:00:04.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-fixture-1","output":"parser test passed"}}
+{"timestamp":"2026-11-02T09:00:05.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the retry count."}]}}
+{"timestamp":"2026-11-02T09:00:06.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Retry count is now three."}]}}

@@ -1,0 +1,6 @@
+{"type":"user","message":{"role":"user","content":"Please check the timeout behavior in the worker."},"cwd":"/work/alpha","sessionId":"claude-fixture-1","timestamp":"2026-11-01T10:00:00.000Z","uuid":"u1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I will inspect the timeout setting."},{"type":"tool_use","id":"toolu_fixture_1","name":"Read","input":{"file_path":"src/worker.ts"}}]},"cwd":"/work/alpha","sessionId":"claude-fixture-1","timestamp":"2026-11-01T10:00:05.000Z","uuid":"a1"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_fixture_1","content":"const timeout = 30; // 結案條件"}]},"cwd":"/work/alpha","sessionId":"claude-fixture-1","timestamp":"2026-11-01T10:00:06.000Z","uuid":"u2"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"結案條件看起來正確，證據是 timeout 30 秒。"}]},"cwd":"/work/alpha","sessionId":"claude-fixture-1","timestamp":"2026-11-01T10:00:07.000Z","uuid":"a2"}
+{"type":"user","message":{"role":"user","content":"謝謝，請再檢查 retry 次數。"},"cwd":"/work/alpha","sessionId":"claude-fixture-1","timestamp":"2026-11-01T10:00:10.000Z","uuid":"u3"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"retry 次數是 3。"}]},"cwd":"/work/alpha","sessionId":"claude-fixture-1","timestamp":"2026-11-01T10:00:11.000Z","uuid":"a3"}
