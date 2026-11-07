@@ -4,7 +4,11 @@
 
 ## 使用者文件
 
-目前還沒有。使用者指南會在對應功能完成後加入。
+- [宿主設定](hosts/README.md)：共同環境變數、profile 與兩層設定檔。
+- [Claude Code](hosts/claude-code.md)
+- [OpenCode](hosts/opencode.md)
+- [Codex](hosts/codex.md)
+- [整理代理](hosts/curator.md)
 
 ## 公開規格
 
@@ -13,3 +17,4 @@
 ## 其他文件
 
 - 專案說明與開發指令：[README.md](../README.md)
+- 版本變更：[CHANGELOG.md](../CHANGELOG.md)
