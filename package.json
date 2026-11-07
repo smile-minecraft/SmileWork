@@ -2,6 +2,25 @@
   "name": "smilework",
   "version": "0.1.0",
   "description": "跨代理共用的本機 MCP 伺服器，管理任務、證據與知識",
+  "license": "MIT",
+  "author": "Smile <Jay950618@gmail.com>",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "task-management",
+    "knowledge-base",
+    "sqlite",
+    "bun"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/smile-minecraft/SmileWork.git"
+  },
+  "homepage": "https://github.com/smile-minecraft/SmileWork#readme",
+  "bugs": {
+    "url": "https://github.com/smile-minecraft/SmileWork/issues"
+  },
   "type": "module",
   "bin": {
     "smilework": "./src/cli/index.ts"
@@ -12,7 +31,8 @@
     "migrations",
     "docs",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "scripts": {
     "test": "bun test",
