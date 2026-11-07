@@ -9,8 +9,10 @@
   "files": [
     "src",
     "schemas",
+    "migrations",
     "docs",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "test": "bun test",
@@ -22,6 +24,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
     "@types/bun": "^1.4.4",
     "ajv": "^8.20.0",
     "typescript": "^5.9.3"
