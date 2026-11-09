@@ -33,6 +33,8 @@ export interface KnowledgeEntry {
   pinned: boolean;
   source: string;
   tags: string[];
+  /** 適用的專案內相對路徑 glob；work_get 產生 brief 時用來挑相關知識。 */
+  scopePaths: string[];
   status: KnowledgeStatus;
   currentVersion: number;
   version: number;

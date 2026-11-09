@@ -50,6 +50,7 @@ describe("work_create 與 work_get", () => {
         [
           "acceptance",
           "acceptanceResults",
+          "baseCommit",
           "contextRefs",
           "createdAt",
           "dependsOn",
@@ -124,6 +125,20 @@ describe("work_create 與 work_get", () => {
       expect(result.code).toBe("VALIDATION_ERROR");
       expect(Object.keys(result).sort()).toEqual(["code", "data", "message", "nextAction", "ok"]);
       expect(Array.isArray(result.data.issues)).toBe(true);
+    });
+  });
+
+  test("scopePaths 使用絕對路徑時，nextAction 給出相對路徑範例", async () => {
+    await withWorkTools(async (context) => {
+      const result = expectFail(
+        await context.call("work_create", {
+          title: "絕對路徑範圍",
+          scopePaths: ["/tmp/project/src"],
+        }),
+      );
+      expect(result.code).toBe("VALIDATION_ERROR");
+      expect(result.nextAction).toContain("相對於專案根目錄");
+      expect(result.nextAction).toContain("src/work/");
     });
   });
 

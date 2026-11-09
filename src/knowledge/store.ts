@@ -42,6 +42,8 @@ export interface CreateKnowledgeEntryInput {
   pinned?: boolean;
   source?: string;
   tags?: readonly string[];
+  /** 適用的專案內相對路徑 glob。 */
+  scopePaths?: readonly string[];
   status?: KnowledgeStatus;
   workId?: string | null;
   /** UTF-8 Markdown 內容，建立時同步產生第一版。 */
@@ -66,6 +68,7 @@ export interface UpdateKnowledgeEntryInput {
   pinned?: boolean;
   source?: string;
   tags?: readonly string[];
+  scopePaths?: readonly string[];
   status?: KnowledgeStatus;
   workId?: string | null;
 }
@@ -154,10 +157,10 @@ export function createKnowledgeEntry(
       const result = db.query(
         `INSERT INTO knowledge_entries (
            knowledge_id, layer, project_id, kind, type, title, description,
-           pinned, source, tags, status, current_version, version, work_id,
+           pinned, source, tags, scope_paths, status, current_version, version, work_id,
            created_at, updated_at, created_by, created_by_model,
            updated_by, updated_by_model
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         input.knowledgeId,
         input.layer,
@@ -169,6 +172,7 @@ export function createKnowledgeEntry(
         input.pinned ? 1 : 0,
         input.source ?? "manual",
         JSON.stringify(normalizeStrings(input.tags)),
+        JSON.stringify(normalizeStrings(input.scopePaths)),
         input.status ?? "active",
         input.workId ?? null,
         now,
@@ -242,6 +246,10 @@ export function updateKnowledgeEntry(
     if (input.tags !== undefined) {
       columns.push("tags = ?");
       values.push(JSON.stringify(normalizeStrings(input.tags)));
+    }
+    if (input.scopePaths !== undefined) {
+      columns.push("scope_paths = ?");
+      values.push(JSON.stringify(normalizeStrings(input.scopePaths)));
     }
     if (input.status !== undefined) {
       columns.push("status = ?");

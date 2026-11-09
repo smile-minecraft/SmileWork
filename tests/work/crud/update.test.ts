@@ -80,6 +80,8 @@ describe("work_update", () => {
         );
         expect(rejected.code).toBe("INVALID_TRANSITION");
         expect(rejected.data).toMatchObject({ from: "in_progress", to: target });
+        expect(rejected.nextAction).toContain("work_review");
+        if (target === "done") expect(rejected.nextAction).toContain("work_complete");
       }
 
       const cancelled = expectOk(

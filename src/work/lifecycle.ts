@@ -21,6 +21,7 @@ import {
   parseStoredToolResult,
 } from "../shared/stored-json.ts";
 import { nowIso } from "../shared/time.ts";
+import { loadWorkContinuity } from "./continuity.ts";
 import {
   evaluateCompletionGates,
   evaluateReviewGates,
@@ -404,7 +405,15 @@ function completeWorkInTransaction(
     dependencies: loadDependencies(db, work.workId),
   });
   const primary = primaryIssue(issues);
-  if (primary) return gateFailure(work, issues, primary);
+  if (primary) {
+    if (primary.code === WORK_ERROR_CODES.invalidTransition && work.status !== "review") {
+      return gateFailure(work, issues, {
+        ...primary,
+        nextAction: `先用 work_review（id: ${work.workId}, expectedVersion: ${work.version}, verdict: approve 或 reject）把工作推進到 review，再用 work_complete（expectedVersion: ${work.version + 1}）結案。`,
+      });
+    }
+    return gateFailure(work, issues, primary);
+  }
 
   const byCriterion = new Map<string, AcceptanceResultItem>();
   for (const item of input.acceptance) byCriterion.set(item.criterion.trim(), item);
@@ -461,12 +470,15 @@ function completeWorkInTransaction(
     createdAt: completedAt,
   });
 
+  const continuity = loadWorkContinuity(db, projectId, work.workId);
   const result = ok("工作已結案。", {
     workId: work.workId,
     status: "done",
     resolution: "completed",
     version: newVersion,
     acceptanceResults,
+    handoff: continuity.handoff,
+    rulings: continuity.rulings,
     completedAt,
   });
 
@@ -573,12 +585,15 @@ function reviewWorkInTransaction(
     createdAt: reviewedAt,
   });
 
+  const continuity = loadWorkContinuity(db, projectId, work.workId);
   return ok("已記錄審查結論。", {
     workId: work.workId,
     status: "review",
     verdict: input.verdict,
     reviewer,
     note: note ?? null,
+    handoff: continuity.handoff,
+    rulings: continuity.rulings,
     reviewedAt,
     reviewedVersion: newVersion,
     version: newVersion,

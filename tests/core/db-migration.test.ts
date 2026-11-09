@@ -69,7 +69,7 @@ describe("資料庫與 migration", () => {
           .query<{ version: number }, []>("SELECT version FROM schema_migrations ORDER BY version")
           .all()
           .map((row) => row.version);
-        expect(migrations).toEqual([1]);
+        expect(migrations).toEqual([1, 2, 3]);
       } finally {
         db.close();
       }
@@ -101,7 +101,7 @@ describe("資料庫與 migration", () => {
         const count = second
           .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM schema_migrations")
           .get();
-        expect(count?.count).toBe(1);
+        expect(count?.count).toBe(3);
       } finally {
         second.close();
       }

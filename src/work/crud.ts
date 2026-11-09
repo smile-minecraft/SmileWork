@@ -15,8 +15,10 @@ import {
 } from "../domain/index.ts";
 import { updateVersionedRow } from "../db/optimistic.ts";
 import { withImmediateTransaction } from "../db/transaction.ts";
+import { findRelevantKnowledge, type RelevantKnowledge } from "../knowledge/relevant.ts";
 import { isProjectResolutionError } from "../mcp/context.ts";
 import type { ToolContext } from "../mcp/types.ts";
+import { gitHeadFor } from "../project/git.ts";
 import { canonicalJson } from "../shared/canonical.ts";
 import { ERROR_CODES, SmileworkError } from "../shared/errors.ts";
 import { newId, sha256Hex } from "../shared/hash.ts";
@@ -28,6 +30,12 @@ import {
   type StoredJsonRef,
 } from "../shared/stored-json.ts";
 import { nowIso } from "../shared/time.ts";
+import {
+  loadWorkContinuity,
+  renderContinuitySections,
+  type WorkHandoff,
+  type WorkRuling,
+} from "./continuity.ts";
 
 /** 工作工具對外承諾的錯誤碼；其他工具的錯誤碼留在各自的模組。 */
 export const WORK_ERROR_CODES = {
@@ -62,6 +70,8 @@ export interface WorkView {
   dependsOn: string[];
   review: WorkReview | null;
   acceptanceResults: AcceptanceResults | null;
+  /** 建立工作時的 git HEAD；非 git 專案或舊資料為 null。 */
+  baseCommit: string | null;
   version: number;
   createdAt: string;
   updatedAt: string;
@@ -111,6 +121,7 @@ interface WorkRow {
   review: string | null;
   reviewed_version: number | null;
   acceptance_results: string | null;
+  base_commit: string | null;
   version: number;
   created_at: string;
   updated_at: string;
@@ -212,6 +223,7 @@ function toWorkView(row: WorkRow, dependsOn: string[], labels: string[]): WorkVi
       row.acceptance_results,
       ref("acceptance_results"),
     ),
+    baseCommit: row.base_commit,
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -348,8 +360,18 @@ function bulletList(items: readonly string[]): string[] {
   return items.map((item) => `- ${item}`);
 }
 
+function knowledgeSummary(text: string): string {
+  const line = text.split(/\r?\n/, 1)[0]?.trim() ?? "";
+  return line.length > 200 ? `${line.slice(0, 197)}…` : line;
+}
+
 /** 從工作欄位產生可以直接交給執行代理的派工說明。 */
-export function renderWorkBrief(work: WorkView, dependencies: readonly DependencySummary[]): string {
+export function renderWorkBrief(
+  work: WorkView,
+  dependencies: readonly DependencySummary[],
+  continuity?: { handoff: WorkHandoff | null; rulings: WorkRuling[] },
+  relatedKnowledge: readonly RelevantKnowledge[] = [],
+): string {
   const lines: string[] = [];
   lines.push(`# ${work.title}`, "");
   lines.push(`- 工作：${work.id}`);
@@ -360,6 +382,11 @@ export function renderWorkBrief(work: WorkView, dependencies: readonly Dependenc
   if (work.risk !== null) lines.push(`- 風險：${work.risk}`);
   if (work.parentId !== null) lines.push(`- 上層：${work.parentId}`);
   if (work.labels.length > 0) lines.push(`- 標籤：${work.labels.join("、")}`);
+  if (work.baseCommit !== null) {
+    lines.push(
+      `- 審查範圍：\`git diff ${work.baseCommit}\`（工作建立時的 HEAD ${work.baseCommit.slice(0, 12)}）`,
+    );
+  }
 
   lines.push("", "## 目標", "", work.objective ?? "（未填寫）");
 
@@ -396,22 +423,44 @@ export function renderWorkBrief(work: WorkView, dependencies: readonly Dependenc
     lines.push("", "## 相關參照", "", ...bulletList(work.contextRefs));
   }
 
+  if (relatedKnowledge.length > 0) {
+    lines.push("", "## 相關知識", "");
+    for (const knowledge of relatedKnowledge) {
+      lines.push(`- ${knowledge.knowledgeId}（${knowledge.type}）：${knowledgeSummary(knowledge.description)}`);
+    }
+  }
+
+  if (continuity) lines.push(...renderContinuitySections(continuity));
+
   return lines.join("\n");
 }
 
 export interface WorkDetail {
   work: WorkView;
   evidence: EvidenceView[];
+  handoff: WorkHandoff | null;
+  rulings: WorkRuling[];
+  relatedKnowledge: RelevantKnowledge[];
   brief: string;
 }
 
 export function getWorkDetail(db: Database, projectId: string, workId: string): WorkDetail {
   const work = getWorkView(db, projectId, workId);
   if (!work) throw workNotFound(workId);
+  const continuity = loadWorkContinuity(db, projectId, workId);
+  const relatedKnowledge = findRelevantKnowledge(db, projectId, work.scopePaths);
   return {
     work,
     evidence: loadEvidence(db, projectId, workId),
-    brief: renderWorkBrief(work, loadDependencySummaries(db, workId)),
+    handoff: continuity.handoff,
+    rulings: continuity.rulings,
+    relatedKnowledge,
+    brief: renderWorkBrief(
+      work,
+      loadDependencySummaries(db, workId),
+      continuity,
+      relatedKnowledge,
+    ),
   };
 }
 
@@ -455,13 +504,12 @@ function dependencyCycle(cycle: readonly string[]): SmileworkError {
   );
 }
 
-function validationError(message: string, data: Record<string, unknown> = {}): SmileworkError {
-  return new SmileworkError(
-    WORK_ERROR_CODES.validation,
-    message,
-    "依錯誤訊息修正參數後重新呼叫。",
-    data,
-  );
+function validationError(
+  message: string,
+  data: Record<string, unknown> = {},
+  nextAction = "依錯誤訊息修正參數後重新呼叫。",
+): SmileworkError {
+  return new SmileworkError(WORK_ERROR_CODES.validation, message, nextAction, data);
 }
 
 function hashRequest(input: unknown): string {
@@ -538,7 +586,11 @@ function normalizeStrings(
 function assertSafeProjectPath(value: string, field: string): void {
   const segments = value.split(/[\\/]/);
   if (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || segments.includes("..")) {
-    throw validationError(`${field} 必須是專案內的相對路徑：${value}`, { field, value });
+    throw validationError(
+      `${field} 必須是專案內的相對路徑：${value}`,
+      { field, value },
+      "用相對於專案根目錄的路徑，例如 src/work/ 或 src/work/crud.ts；不要用絕對路徑或 ..。",
+    );
   }
 }
 
@@ -559,6 +611,90 @@ function normalizeOwner(value: string | undefined, actor: Actor): string {
   const owner = value.trim();
   if (owner.length === 0) throw validationError("owner 不能是空白字串。", { field: "owner" });
   return owner;
+}
+
+function normalizeHandoff(input: WorkHandoffInput): WorkHandoffInput {
+  return {
+    currentState: normalizeStrings([input.currentState], "handoff.currentState")[0]!,
+    decisions: normalizeStrings(input.decisions, "handoff.decisions"),
+    nextSteps: normalizeStrings(input.nextSteps, "handoff.nextSteps"),
+    unverified: normalizeStrings(input.unverified, "handoff.unverified"),
+  };
+}
+
+function normalizeRulings(input: readonly WorkRulingInput[]): WorkRulingInput[] {
+  return input.map((ruling, index) => {
+    const costIfWrong = ruling.costIfWrong?.trim();
+    return {
+      decision: normalizeStrings([ruling.decision], `rulings[${index}].decision`)[0]!,
+      rationale: normalizeStrings([ruling.rationale], `rulings[${index}].rationale`)[0]!,
+      ...(costIfWrong === undefined || costIfWrong === ""
+        ? {}
+        : { costIfWrong }),
+    };
+  });
+}
+
+function detailString(
+  details: Record<string, unknown>,
+  field: string,
+  label: string,
+): string {
+  const value = details[field];
+  if (typeof value !== "string" || value.trim() === "") {
+    throw validationError(`${label} 的 details.${field} 必須是非空白字串。`, { field });
+  }
+  return value;
+}
+
+function detailStringArray(
+  details: Record<string, unknown>,
+  field: string,
+  label: string,
+): string[] {
+  const value = details[field];
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw validationError(`${label} 的 details.${field} 必須是字串陣列。`, { field });
+  }
+  return value as string[];
+}
+
+function handoffFromDetails(
+  details: Record<string, unknown> | undefined,
+  label: string,
+): WorkHandoffInput {
+  if (details === undefined) {
+    throw validationError(`${label} 必須提供 details。`, { field: "details" });
+  }
+  return normalizeHandoff({
+    currentState: detailString(details, "currentState", label),
+    decisions: detailStringArray(details, "decisions", label),
+    nextSteps: detailStringArray(details, "nextSteps", label),
+    unverified: detailStringArray(details, "unverified", label),
+  });
+}
+
+function rulingFromDetails(
+  details: Record<string, unknown> | undefined,
+  label: string,
+): WorkRulingInput {
+  if (details === undefined) {
+    throw validationError(`${label} 必須提供 details。`, { field: "details" });
+  }
+  const costIfWrong = details.costIfWrong;
+  if (costIfWrong !== undefined && typeof costIfWrong !== "string") {
+    throw validationError(`${label} 的 details.costIfWrong 必須是字串。`, {
+      field: "costIfWrong",
+    });
+  }
+  return normalizeRulings([
+    {
+      decision: detailString(details, "decision", label),
+      rationale: detailString(details, "rationale", label),
+      ...(costIfWrong === undefined ? {} : { costIfWrong }),
+    },
+  ])[0]!;
 }
 
 function writeLabels(db: Database, workId: string, labels: readonly string[], now: string): void {
@@ -739,15 +875,16 @@ export function createWork(
 
         const workId = newId("work");
         const now = nowIso();
+        const baseCommit = gitHeadFor(project.worktreePath);
         db.query(
           `INSERT INTO work_items (
              work_id, project_id, kind, title, status, resolution, owner, priority,
              plan_id, objective, non_goals, context_refs, scope_paths, acceptance, risk,
-             review, reviewed_version, acceptance_results, version, created_at, updated_at,
+             review, reviewed_version, acceptance_results, base_commit, version, created_at, updated_at,
              created_by, created_by_model, updated_by, updated_by_model
            ) VALUES (
              ?, ?, ?, ?, 'open', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-             NULL, NULL, NULL, 1, ?, ?,
+             NULL, NULL, NULL, ?, 1, ?, ?,
              ?, ?, ?, ?
            )`,
         ).run(
@@ -764,6 +901,7 @@ export function createWork(
           JSON.stringify(scopePaths),
           JSON.stringify(acceptance),
           input.risk,
+          baseCommit,
           now,
           now,
           actor.name,
@@ -785,7 +923,7 @@ export function createWork(
           actor,
           workId,
           summary: input.kind === "plan" ? `建立計畫：${title}` : `建立工作：${title}`,
-          details: { kind: input.kind, parentId: input.parentId ?? null },
+          details: { kind: input.kind, parentId: input.parentId ?? null, baseCommit },
           now,
         });
 
@@ -888,7 +1026,13 @@ export function listWorks(
   };
 }
 
-export type EvidenceInputKind = "verify_run" | "link" | "output" | "note";
+export type EvidenceInputKind =
+  | "verify_run"
+  | "link"
+  | "output"
+  | "note"
+  | "handoff"
+  | "ruling";
 
 export interface EvidenceInput {
   kind: EvidenceInputKind;
@@ -898,6 +1042,19 @@ export interface EvidenceInput {
   url?: string;
   path?: string;
   details?: Record<string, unknown>;
+}
+
+export interface WorkHandoffInput {
+  currentState: string;
+  decisions: string[];
+  nextSteps: string[];
+  unverified: string[];
+}
+
+export interface WorkRulingInput {
+  decision: string;
+  rationale: string;
+  costIfWrong?: string;
 }
 
 export interface UpdateWorkInput {
@@ -977,7 +1134,13 @@ function mapEvidence(item: EvidenceInput): MappedEvidence {
     }
     case "output": {
       const path = item.path?.trim();
-      if (!path) throw validationError("output 證據必須提供 path。", { kind: item.kind });
+      if (!path) {
+        throw validationError(
+          "output 證據必須提供 path。",
+          { kind: item.kind },
+          "kind: output 要提供 path（專案內相對路徑）；如果只想附上指令輸出文字，改用 kind: note 或 verify_run。",
+        );
+      }
       assertSafeProjectPath(path, "evidence.path");
       return {
         reportedKind: item.kind,
@@ -1001,6 +1164,14 @@ function mapEvidence(item: EvidenceInput): MappedEvidence {
         path: null,
         details: item.details ?? null,
       };
+    case "handoff":
+    case "ruling":
+      throw new SmileworkError(
+        ERROR_CODES.internal,
+        `${item.kind} 證據應該由交接流程處理，不應該進到一般證據。`,
+        "回報這個問題，並附上工作 ID 與證據內容。",
+        { kind: item.kind },
+      );
   }
 }
 
@@ -1075,11 +1246,15 @@ export function updateWork(
         let resolution = current.resolution;
         if (input.status !== undefined) {
           if (input.status === "review" || input.status === "done") {
+            const nextAction =
+              input.status === "review"
+                ? `改用 work_review（id: ${input.id}, expectedVersion: ${current.version}, verdict: approve 或 reject）。`
+                : `work_update 不能直接設定 done；先呼叫 work_review（id: ${input.id}, expectedVersion: ${current.version}），再用 work_complete（expectedVersion: ${current.version + 1}）。`;
             throw invalidTransition(
               current.status,
               input.status,
               `工作狀態 ${input.status} 只能由審查或結案工具設定。`,
-              "改用 work_review 或 work_complete。",
+              nextAction,
             );
           }
           if (input.status !== current.status) {
@@ -1170,6 +1345,14 @@ export function updateWork(
           ).run(input.id, dependency, nowIso());
         }
 
+        const evidenceItems = input.evidence ?? [];
+        const continuityItems = evidenceItems.filter(
+          (item) => item.kind === "handoff" || item.kind === "ruling",
+        );
+        const regularEvidenceItems = evidenceItems.filter(
+          (item) => item.kind !== "handoff" && item.kind !== "ruling",
+        );
+
         const changedFields: string[] = [];
         if (input.title !== undefined) changedFields.push("title");
         if (input.objective !== undefined) changedFields.push("objective");
@@ -1185,6 +1368,7 @@ export function updateWork(
         if (input.parentId !== undefined) changedFields.push("parentId");
         if (input.addDependsOn !== undefined) changedFields.push("dependsOn");
         if (input.removeDependsOn !== undefined) changedFields.push("dependsOn");
+        if (continuityItems.length > 0) changedFields.push("continuity");
 
         const now = nowIso();
         const outcome = updateVersionedRow(db, {
@@ -1219,6 +1403,33 @@ export function updateWork(
 
         writeLabels(db, input.id, labels, now);
 
+        for (const item of continuityItems) {
+          if (item.kind === "handoff") {
+            const handoff = handoffFromDetails(item.details, `證據「${item.summary}」`);
+            appendEvent(db, {
+              projectId: project.projectId,
+              kind: "handoff",
+              actor,
+              workId: input.id,
+              summary: item.summary,
+              details: { ...handoff },
+              now,
+            });
+            continue;
+          }
+
+          const ruling = rulingFromDetails(item.details, `證據「${item.summary}」`);
+          appendEvent(db, {
+            projectId: project.projectId,
+            kind: "ruling",
+            actor,
+            workId: input.id,
+            summary: `決定：${ruling.decision}`,
+            details: { ...ruling },
+            now,
+          });
+        }
+
         if (input.status !== undefined && input.status !== current.status) {
           appendEvent(db, {
             projectId: project.projectId,
@@ -1233,8 +1444,14 @@ export function updateWork(
           });
         }
 
-        const evidenceItems = input.evidence ?? [];
-        const evidence = insertEvidence(db, project.projectId, actor, input.id, evidenceItems, now);
+        const evidence = insertEvidence(
+          db,
+          project.projectId,
+          actor,
+          input.id,
+          regularEvidenceItems,
+          now,
+        );
 
         if (changedFields.length > 0) {
           appendEvent(db, {

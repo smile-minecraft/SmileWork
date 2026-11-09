@@ -60,6 +60,7 @@ const inputSchema = z.object({
   type: z.enum(KNOWLEDGE_TYPES).optional(),
   pinned: z.boolean().optional(),
   tags: z.array(z.string().trim().min(1).max(100)).max(50).optional(),
+  scopePaths: z.array(z.string().trim().min(1).max(500)).max(100).optional(),
   source: z.string().trim().min(1).max(200).optional(),
   content: z.string().min(1),
   files: z.array(fileSchema).max(100).optional(),
@@ -105,6 +106,27 @@ function normalizeFiles(
     seen.add(path);
     return { path, content: file.content };
   });
+}
+
+function normalizeScopePaths(values: readonly string[]): string[] {
+  const result = new Set<string>();
+  for (const raw of values) {
+    const value = raw.trim().replaceAll("\\", "/").replace(/^\.\//, "");
+    if (
+      value === "" ||
+      value.startsWith("/") ||
+      /^[A-Za-z]:\//.test(value) ||
+      value.split("/").includes("..")
+    ) {
+      throw invalidKnowledgeInput(
+        `scopePaths 必須是專案內的相對路徑 glob：${raw}`,
+        "使用像 src/work/** 的相對於專案根目錄路徑，不要用絕對路徑或 ..。",
+        { field: "scopePaths", value: raw },
+      );
+    }
+    result.add(value);
+  }
+  return [...result].sort();
 }
 
 function assertContentNotEmpty(content: string): void {
@@ -157,7 +179,7 @@ export const tool = defineTool({
   name: "knowledge_write",
   title: "寫入知識",
   description:
-    "寫入記憶或技能，落地成宿主載入的實體檔案並建立版本。支援 global/project 兩層、技能附檔、expectedVersion 樂觀鎖、來源訊號、理由與 idempotencyKey。更新技能時省略 files 會保留舊附檔；明確傳 files:[] 會清空附檔；傳非空清單則視為完整集合，刪除未列出的附檔。技能附檔不能使用保留名稱 SKILL.md（不分大小寫）。v1 限制：附檔只落地成實體檔案，不進版本快照；版本只保存 content。",
+    "寫入記憶或技能，落地成宿主載入的實體檔案並建立版本。支援 global/project 兩層、scopePaths 適用路徑 glob、技能附檔、expectedVersion 樂觀鎖、來源訊號、理由與 idempotencyKey。更新技能時省略 files 會保留舊附檔；明確傳 files:[] 會清空附檔；傳非空清單則視為完整集合，刪除未列出的附檔。技能附檔不能使用保留名稱 SKILL.md（不分大小寫）。v1 限制：附檔只落地成實體檔案，不進版本快照；版本只保存 content。",
   domain: "knowledge",
   inputSchema,
   handler(input, context) {
@@ -184,6 +206,8 @@ export const tool = defineTool({
     const projectPath = project?.worktreePath ?? null;
     const sourceSignalIds = [...new Set(parsed.sourceSignalIds)].sort();
     const tags = parsed.tags === undefined ? null : [...new Set(parsed.tags)].sort();
+    const scopePaths =
+      parsed.scopePaths === undefined ? null : normalizeScopePaths(parsed.scopePaths);
 
     const request = {
       kind: parsed.kind,
@@ -195,6 +219,7 @@ export const tool = defineTool({
       type: parsed.type ?? null,
       pinned: parsed.pinned ?? null,
       tags,
+      scopePaths,
       source: parsed.source ?? null,
       content: parsed.content,
       files,
@@ -253,6 +278,9 @@ export const tool = defineTool({
           const effectiveTags = existing
             ? (tags ?? existing.tags)
             : (tags ?? []);
+          const effectiveScopePaths = existing
+            ? (scopePaths ?? existing.scopePaths)
+            : (scopePaths ?? []);
           const filesToWrite = files ?? [];
           const filesProvided = files !== null;
 
@@ -330,6 +358,7 @@ export const tool = defineTool({
                 pinned: effectivePinned,
                 source: effectiveSource,
                 tags: effectiveTags,
+                scopePaths: effectiveScopePaths,
               },
               storeOptions,
             );
@@ -349,6 +378,7 @@ export const tool = defineTool({
                 pinned: effectivePinned,
                 source: effectiveSource,
                 tags: effectiveTags,
+                scopePaths: effectiveScopePaths,
                 content: parsed.content,
                 actor: context.actor.name,
                 actorModel: context.actor.model,

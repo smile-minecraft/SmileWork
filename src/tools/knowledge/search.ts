@@ -208,6 +208,7 @@ export const tool = defineTool({
       kind: entry.kind,
       type: entry.type,
       title: entry.title,
+      scopePaths: entry.scopePaths,
       status: entry.status,
       pinned: entry.pinned,
       currentVersion: entry.currentVersion,

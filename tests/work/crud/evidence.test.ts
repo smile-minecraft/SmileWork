@@ -76,25 +76,49 @@ describe("work_update 的人工證據", () => {
       const work = expectOk(await context.call("work_create", { title: "證據驗證" })).data.work;
 
       const cases = [
-        { kind: "verify_run", summary: "沒有指令" },
-        { kind: "output", summary: "沒有路徑" },
-        { kind: "link", summary: "沒有網址" },
+        { evidence: { kind: "verify_run", summary: "沒有指令" }, nextAction: null },
+        {
+          evidence: { kind: "output", summary: "沒有路徑" },
+          nextAction: "kind: note 或 verify_run",
+        },
+        { evidence: { kind: "link", summary: "沒有網址" }, nextAction: null },
       ];
 
-      for (const evidence of cases) {
+      for (const entry of cases) {
         const rejected = expectFail(
           await context.call("work_update", {
             id: work.id,
             expectedVersion: 1,
-            evidence: [evidence],
+            evidence: [entry.evidence],
           }),
         );
         expect(rejected.code).toBe("VALIDATION_ERROR");
+        if (entry.nextAction !== null) {
+          expect(rejected.nextAction).toContain(entry.nextAction);
+        }
       }
 
       expect(countRows(context.home, "evidence")).toBe(0);
       const got = expectOk(await context.call("work_get", { id: work.id }));
       expect(got.data.work.version).toBe(1);
+    });
+  });
+
+  test("output 的 path 是絕對路徑時，nextAction 給出相對路徑範例", async () => {
+    await withWorkTools(async (context) => {
+      const work = expectOk(await context.call("work_create", { title: "路徑提示" })).data.work;
+      const rejected = expectFail(
+        await context.call("work_update", {
+          id: work.id,
+          expectedVersion: 1,
+          evidence: [
+            { kind: "output", summary: "絕對路徑", path: "/tmp/result.txt" },
+          ],
+        }),
+      );
+      expect(rejected.code).toBe("VALIDATION_ERROR");
+      expect(rejected.nextAction).toContain("相對於專案根目錄");
+      expect(rejected.nextAction).toContain("src/work/");
     });
   });
 

@@ -56,6 +56,7 @@ export interface KnowledgeEntryRow {
   pinned: number;
   source: string;
   tags: string;
+  scope_paths: string;
   status: string;
   current_version: number;
   version: number;
@@ -98,6 +99,11 @@ export function rowToKnowledgeEntry(row: KnowledgeEntryRow): KnowledgeEntry {
       entity: "知識項目",
       id: row.knowledge_id,
       field: "tags",
+    }),
+    scopePaths: parseStoredStringArray(row.scope_paths, {
+      entity: "知識項目",
+      id: row.knowledge_id,
+      field: "scope_paths",
     }),
     status: row.status as KnowledgeStatus,
     currentVersion: row.current_version,

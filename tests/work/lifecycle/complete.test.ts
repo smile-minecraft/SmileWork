@@ -554,6 +554,9 @@ describe("work_complete 的錯誤情況", () => {
       expect(fromInProgress.ok).toBe(false);
       if (fromInProgress.ok) return;
       expect(fromInProgress.code).toBe("INVALID_TRANSITION");
+      expect(fromInProgress.nextAction).toContain("work_review");
+      expect(fromInProgress.nextAction).toContain("expectedVersion: 1");
+      expect(fromInProgress.nextAction).toContain("work_complete");
 
       const done = insertWork(db, projectId, {
         status: "done",

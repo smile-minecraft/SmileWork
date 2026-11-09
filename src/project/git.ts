@@ -40,6 +40,16 @@ function mainWorktreeFromPorcelain(output: string): string | null {
   return null;
 }
 
+/** 讀取目前 worktree 的 HEAD；不是 git repo 或還沒有 commit 時回 null。 */
+export function gitHeadFor(path: string): string | null {
+  try {
+    const head = gitOutput(path, ["rev-parse", "HEAD"]);
+    return head === "" ? null : head;
+  } catch {
+    return null;
+  }
+}
+
 /** 解析路徑所在的 git worktree；不是 git repo 時回 null。 */
 export function gitLocationFor(path: string): GitLocation | null {
   const directory = existingDirectory(path);

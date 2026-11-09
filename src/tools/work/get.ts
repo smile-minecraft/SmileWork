@@ -30,6 +30,12 @@ export const tool = defineTool({
         brief: detail.brief,
       });
     }
-    return ok("已讀取工作。", { work: detail.work, evidence: detail.evidence });
+    return ok("已讀取工作。", {
+      work: detail.work,
+      evidence: detail.evidence,
+      handoff: detail.handoff,
+      rulings: detail.rulings,
+      relatedKnowledge: detail.relatedKnowledge,
+    });
   },
 });
