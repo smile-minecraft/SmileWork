@@ -180,6 +180,26 @@ describe("smilework link CLI", () => {
     });
   }, 30_000);
 
+  test("--host pi 建立 Pi 技能連結", async () => {
+    await withTempDir("link-cli-pi", async (root) => {
+      const home = join(root, "home");
+      await mkdir(home, { recursive: true });
+      const source = await writeSkill(home, "alpha");
+
+      const result = await runCli(["link", "--host", "pi"], home);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("[pi]");
+      expect(result.stdout).not.toContain("[claude]");
+
+      const linkPath = join(home, ".pi", "agent", "skills", "alpha");
+      expect((await lstat(linkPath)).isSymbolicLink()).toBe(true);
+      expect(await realpath(resolve(dirname(linkPath), await readlink(linkPath)))).toBe(
+        await realpath(source),
+      );
+      expect(existsSync(join(home, ".claude"))).toBe(false);
+    });
+  }, 30_000);
+
   test("--project 指向不存在路徑時回錯誤", async () => {
     await withTempDir("link-cli-missing-project", async (root) => {
       const home = join(root, "home");

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { lstat, mkdir, readlink, realpath, stat, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -6,16 +7,22 @@ import {
   claudeSkillsDir,
   expandHome,
   globalSkillsDir,
+  piSkillsDir,
+  projectPiSkillsDir,
   projectSkillsDir,
 } from "../shared/paths.ts";
 import { scanSkillsRoot } from "./discover.ts";
 import type {
   CrossLayerSkill,
+  SkillHost,
+  SkillHostSummary,
   SkillLayer,
   SkillLinkResult,
   SkillLinkSummary,
   SkillSourceSummary,
 } from "./types.ts";
+
+const DEFAULT_HOSTS: readonly SkillHost[] = ["claude", "pi"];
 
 export interface LinkSkillsOptions {
   /** 使用者家目錄；測試會傳暫存目錄，預設為目前使用者的家目錄。 */
@@ -24,6 +31,8 @@ export interface LinkSkillsOptions {
   readonly projectPath?: string;
   /** 只列出計畫，不建立任何檔案或 symlink。 */
   readonly dryRun?: boolean;
+  /** 要處理的宿主；省略時 Claude 一定處理，Pi 只在實際安裝時處理。 */
+  readonly hosts?: readonly SkillHost[];
 }
 
 interface Candidate {
@@ -110,6 +119,7 @@ function buildCandidates(
 }
 
 function findOverlaps(
+  host: SkillHost,
   globalSkills: readonly string[],
   projectSkills: readonly string[] | null,
   globalRoot: string,
@@ -124,11 +134,49 @@ function findOverlaps(
     .sort()
     .map((name) => ({
       name,
+      host,
       globalSourcePath: join(globalRoot, name),
       projectSourcePath: join(projectRoot, name),
       globalLinkPath: join(globalLinkRoot, name),
       projectLinkPath: join(projectLinkRoot, name),
     }));
+}
+
+function resolveHosts(
+  options: LinkSkillsOptions,
+  home: string,
+  projectPath: string | null,
+): SkillHost[] {
+  const requested = [...new Set(options.hosts ?? DEFAULT_HOSTS)];
+  if (requested.length === 0) {
+    throw invalidInput("至少要指定一個宿主。", "把 hosts 設成 claude 或 pi。");
+  }
+  const explicitlyRequested = options.hosts !== undefined;
+  return requested.filter((host) => {
+    if (host === "claude") return true;
+    if (explicitlyRequested) return true;
+    return (
+      existsSync(join(home, ".pi")) ||
+      (projectPath !== null && existsSync(join(projectPath, ".pi")))
+    );
+  });
+}
+
+function hostRoots(
+  host: SkillHost,
+  home: string,
+  projectPath: string | null,
+): { globalLinkRoot: string; projectLinkRoot: string | null } {
+  if (host === "claude") {
+    return {
+      globalLinkRoot: claudeSkillsDir(home),
+      projectLinkRoot: projectPath ? projectClaudeSkillsDir(projectPath) : null,
+    };
+  }
+  return {
+    globalLinkRoot: piSkillsDir(home),
+    projectLinkRoot: projectPath ? projectPiSkillsDir(projectPath) : null,
+  };
 }
 
 type ExistingLink =
@@ -236,6 +284,7 @@ async function createSymlink(linkPath: string, target: string): Promise<boolean>
 
 async function handleCandidate(
   candidate: Candidate,
+  host: SkillHost,
   linkRoot: string,
   dryRun: boolean,
 ): Promise<SkillLinkResult> {
@@ -243,6 +292,7 @@ async function handleCandidate(
   const base = {
     name: candidate.name,
     layer: candidate.layer,
+    host,
     sourcePath: candidate.sourcePath,
     linkPath,
   } as const;
@@ -280,7 +330,7 @@ async function handleCandidate(
   return { ...base, outcome: "conflict", reason: `已存在${existing.label}，未覆蓋` };
 }
 
-/** 把兩層 .agents/skills 的技能各自連到該層的 Claude Code 技能根目錄。 */
+/** 把兩層 .agents/skills 的技能各自連到每個宿主的技能根目錄。 */
 export async function linkSkills(options: LinkSkillsOptions = {}): Promise<SkillLinkSummary> {
   const home = resolve(options.home ?? homedir());
   const dryRun = options.dryRun ?? false;
@@ -291,8 +341,11 @@ export async function linkSkills(options: LinkSkillsOptions = {}): Promise<Skill
   const projectRoot = projectPath ? projectSkillsDir(projectPath) : null;
   const projectScan = projectRoot ? await scanSkillsRoot(projectRoot) : null;
 
-  const globalLinkRoot = claudeSkillsDir(home);
-  const projectLinkRoot = projectPath ? projectClaudeSkillsDir(projectPath) : null;
+  const hosts = resolveHosts(options, home, projectPath);
+  const hostSummaries: SkillHostSummary[] = hosts.map((host) => ({
+    host,
+    ...hostRoots(host, home, projectPath),
+  }));
 
   const sources: SkillSourceSummary[] = [
     {
@@ -319,26 +372,39 @@ export async function linkSkills(options: LinkSkillsOptions = {}): Promise<Skill
   );
   const results: SkillLinkResult[] = [];
   for (const candidate of candidates) {
-    const linkRoot = candidate.layer === "global" ? globalLinkRoot : projectLinkRoot;
-    if (!linkRoot) throw invalidInput("缺少專案層 link 根目錄。", "確認 --project 參數。");
-    results.push(await handleCandidate(candidate, linkRoot, dryRun));
+    for (const target of hostSummaries) {
+      const linkRoot = candidate.layer === "global" ? target.globalLinkRoot : target.projectLinkRoot;
+      if (!linkRoot) throw invalidInput("缺少專案層 link 根目錄。", "確認 --project 參數。");
+      results.push(await handleCandidate(candidate, target.host, linkRoot, dryRun));
+    }
   }
 
+  const overlaps: CrossLayerSkill[] = [];
+  for (const target of hostSummaries) {
+    overlaps.push(
+      ...findOverlaps(
+        target.host,
+        globalScan.skills,
+        projectScan?.skills ?? null,
+        globalRoot,
+        projectRoot,
+        target.globalLinkRoot,
+        target.projectLinkRoot,
+      ),
+    );
+  }
+
+  const claude = hostSummaries.find((target) => target.host === "claude");
+  const primary = claude ?? hostSummaries[0];
   return {
     home,
-    globalLinkRoot,
-    projectLinkRoot,
+    globalLinkRoot: primary?.globalLinkRoot ?? claudeSkillsDir(home),
+    projectLinkRoot: primary?.projectLinkRoot ?? null,
     projectPath,
     dryRun,
     sources,
+    hosts: hostSummaries,
     results,
-    overlaps: findOverlaps(
-      globalScan.skills,
-      projectScan?.skills ?? null,
-      globalRoot,
-      projectRoot,
-      globalLinkRoot,
-      projectLinkRoot,
-    ),
+    overlaps,
   };
 }

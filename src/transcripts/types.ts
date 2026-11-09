@@ -1,5 +1,5 @@
-/** 對話紀錄的來源。三種格式都不是穩定介面，adapter 讀不懂時只記警告。 */
-export const TRANSCRIPT_SOURCES = ["claude", "codex", "opencode"] as const;
+/** 對話紀錄的來源。四種格式都不是穩定介面，adapter 讀不懂時只記警告。 */
+export const TRANSCRIPT_SOURCES = ["claude", "codex", "opencode", "pi"] as const;
 
 export type TranscriptSource = (typeof TRANSCRIPT_SOURCES)[number];
 

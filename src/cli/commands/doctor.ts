@@ -174,10 +174,9 @@ function skillsCheck(skills: SkillHealth): DoctorCheck {
     return okCheck("技能連結", `沒有使用者層技能（${skills.source.path}），略過檢查`);
   }
   if (skills.status === "linked") {
-    return okCheck(
-      "技能連結",
-      `已連結 ${skills.links.symlinks.length} 個技能到 ${skills.links.path}`,
-    );
+    const detail = [`已連結 ${skills.links.symlinks.length} 個技能到 ${skills.links.path}`];
+    if (skills.piLinks) detail.push(`Pi：${skills.piLinks.path}`);
+    return okCheck("技能連結", detail.join("；"));
   }
   if (skills.status === "unavailable") {
     return warnCheck(
@@ -188,18 +187,32 @@ function skillsCheck(skills: SkillHealth): DoctorCheck {
   }
 
   const problems: string[] = [];
-  if (skills.links.broken.length > 0) problems.push(`斷鏈：${skills.links.broken.join("、")}`);
-  if (skills.links.conflicts.length > 0) problems.push(`同名實體資料夾：${skills.links.conflicts.join("、")}`);
-  if (skills.links.missing.length > 0) problems.push(`尚未連結：${skills.links.missing.join("、")}`);
+  const linkSets = [
+    { label: "", links: skills.links },
+    ...(skills.piLinks ? [{ label: "Pi ", links: skills.piLinks }] : []),
+  ];
+  for (const { label, links } of linkSets) {
+    if (links.broken.length > 0) problems.push(`${label}斷鏈：${links.broken.join("、")}`);
+    if (links.conflicts.length > 0) {
+      problems.push(`${label}同名實體資料夾：${links.conflicts.join("、")}`);
+    }
+    if (links.missing.length > 0) problems.push(`${label}尚未連結：${links.missing.join("、")}`);
+  }
   if (problems.length === 0 && skills.source.skills.length > 0) {
     problems.push(`尚未連結：${skills.source.skills.join("、")}`);
   }
 
   return warnCheck(
     "技能連結",
-    `${problems.join("；") || "狀態不完整"}（${skills.links.path}）`,
+    `${problems.join("；") || "狀態不完整"}（${linksForProblem(skills)}）`,
     "執行 smilework link；專案層技能加上 --project <repo>。",
   );
+}
+
+function linksForProblem(skills: SkillHealth): string {
+  return skills.piLinks
+    ? `${skills.links.path}、${skills.piLinks.path}`
+    : skills.links.path;
 }
 
 function transcriptsCheck(transcripts: TranscriptHealth): DoctorCheck {

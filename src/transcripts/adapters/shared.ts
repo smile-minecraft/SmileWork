@@ -11,7 +11,7 @@ export interface LineState {
   toolNames: Record<string, string>;
 }
 
-export function createLineState(source: "claude" | "codex", filePath: string): LineState {
+export function createLineState(source: "claude" | "codex" | "pi", filePath: string): LineState {
   const stem = basename(filePath, extname(filePath));
   return {
     sessionRef: `${source}:${stem}`,
@@ -23,7 +23,7 @@ export function createLineState(source: "claude" | "codex", filePath: string): L
 }
 
 export function restoreLineState(
-  source: "claude" | "codex",
+  source: "claude" | "codex" | "pi",
   filePath: string,
   stored: unknown,
 ): LineState {
@@ -60,7 +60,7 @@ export function startTurn(state: LineState): number {
 
 export function setSessionRef(
   state: LineState,
-  source: "claude" | "codex",
+  source: "claude" | "codex" | "pi",
   sessionId: string | undefined,
 ): void {
   if (!sessionId || state.explicitSession) return;

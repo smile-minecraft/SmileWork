@@ -143,7 +143,7 @@ export function searchTranscripts(
     throw new SmileworkError(
       ERROR_CODES.invalidInput,
       `不支援的對話來源：${input.source}`,
-      "source 只能是 claude、codex 或 opencode。",
+      `source 只能是 ${TRANSCRIPT_SOURCES.join("、")}。`,
       { field: "source" },
     );
   }

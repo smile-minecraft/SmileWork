@@ -5,6 +5,7 @@ import { withImmediateTransaction } from "../db/transaction.ts";
 import { smileworkTranscriptsPath } from "../shared/paths.ts";
 import { parseClaudeRecord } from "./adapters/claude.ts";
 import { parseCodexRecord } from "./adapters/codex.ts";
+import { parsePiRecord, projectPathFromSlug } from "./adapters/pi.ts";
 import {
   countIndexableOpencodeMessages,
   detectOpencodeSchema,
@@ -41,7 +42,7 @@ import {
 import type { ParsedEntry, TranscriptSource } from "./types.ts";
 import { asRecord } from "./adapters/shared.ts";
 
-const JSONL_SOURCES = ["claude", "codex"] as const;
+const JSONL_SOURCES = ["claude", "codex", "pi"] as const;
 
 interface AdapterDefinition {
   readonly parseRecord: (record: Record<string, unknown>, state: LineState) => {
@@ -62,6 +63,20 @@ const ADAPTERS: Record<(typeof JSONL_SOURCES)[number], AdapterDefinition> = {
     parseRecord: parseCodexRecord,
     createState: (path) => createLineState("codex", path),
     restoreState: (path, stored) => restoreLineState("codex", path, stored),
+  },
+  pi: {
+    parseRecord: parsePiRecord,
+    createState: (path) => {
+      const state = createLineState("pi", path);
+      const projectPath = projectPathFromSlug(path);
+      if (projectPath !== undefined) state.projectPath = projectPath;
+      return state;
+    },
+    restoreState: (path, stored) => {
+      const state = restoreLineState("pi", path, stored);
+      if (!state.projectPath) state.projectPath = projectPathFromSlug(path);
+      return state;
+    },
   },
 };
 
@@ -179,7 +194,9 @@ export function buildTranscriptIndex(options: BuildOptions = {}): BuildReport {
           clearJsonlSource(db, source);
           continue;
         }
-        const root = transcriptPaths(env)[source === "claude" ? "claudeDir" : "codexDir"];
+        const paths = transcriptPaths(env);
+        const root =
+          source === "claude" ? paths.claudeDir : source === "codex" ? paths.codexDir : paths.piDir;
         collectJsonlFiles(db, source, root, config, files, warnings, errors, touch);
       }
 

@@ -15,6 +15,7 @@ export interface TranscriptPaths {
   readonly claudeDir: string;
   readonly codexDir: string;
   readonly opencodeDb: string;
+  readonly piDir: string;
 }
 
 const DEFAULT_MAX_ENTRY_CHARS = 20_000;
@@ -91,6 +92,9 @@ export function transcriptPaths(env: NodeJS.ProcessEnv = process.env): Transcrip
     opencodeDb: env.SMILEWORK_OPENCODE_DB
       ? expandHome(env.SMILEWORK_OPENCODE_DB, home)
       : join(dataHome, "opencode", "opencode.db"),
+    piDir: env.SMILEWORK_PI_SESSIONS_DIR
+      ? expandHome(env.SMILEWORK_PI_SESSIONS_DIR, home)
+      : join(home, ".pi", "agent", "sessions"),
   };
 }
 

@@ -10,6 +10,7 @@ import { SmileworkError } from "../shared/errors.ts";
 import {
   claudeSkillsDir,
   globalSkillsDir,
+  piSkillsDir,
   smileworkDatabasePath,
   smileworkTranscriptsPath,
 } from "../shared/paths.ts";
@@ -76,7 +77,10 @@ export interface SkillLinkHealth {
 export interface SkillHealth {
   status: SkillHealthStatus;
   source: SkillSourceHealth;
+  /** Claude Code 的技能連結。 */
   links: SkillLinkHealth;
+  /** Pi 的技能連結；沒有安裝 Pi（~/.pi 不存在）時為 null。 */
+  piLinks: SkillLinkHealth | null;
   error: string | null;
 }
 
@@ -289,31 +293,57 @@ function inspectProject(
   }
 }
 
+function combineSkillStatus(
+  left: SkillHealthStatus,
+  right: SkillHealthStatus,
+): SkillHealthStatus {
+  if (left === "broken" || right === "broken") return "broken";
+  if (left === "linked" && right === "linked") return "linked";
+  if (left === "not_linked" && right === "not_linked") return "not_linked";
+  if (left === "not_configured") return right;
+  if (right === "not_configured") return left;
+  return "partial";
+}
+
+function emptySkillLinks(path: string): SkillLinkHealth {
+  return {
+    path,
+    exists: false,
+    symlinks: [],
+    broken: [],
+    missing: [],
+    conflicts: [],
+  };
+}
+
 function inspectSkills(env: NodeJS.ProcessEnv, warnings: string[]): SkillHealth {
   const home = userHome(env);
   const sourcePath = globalSkillsDir(home);
   const linkPath = claudeSkillsDir(home);
+  const piLinkPath = piSkillsDir(home);
+  const piConfigured = existsSync(join(home, ".pi"));
 
   try {
     const source = readSkillSource(sourcePath);
     const links = readSkillLinks(linkPath, source.skills);
-    const status = decideSkillStatus(source, links);
+    const piLinks = piConfigured ? readSkillLinks(piLinkPath, source.skills) : null;
+
+    let status = decideSkillStatus(source, links);
     pushSkillWarnings(status, source, links, warnings);
-    return { status, source, links, error: null };
+    if (piLinks !== null) {
+      const piStatus = decideSkillStatus(source, piLinks);
+      status = combineSkillStatus(status, piStatus);
+      pushSkillWarnings(piStatus, source, piLinks, warnings, "Pi ");
+    }
+    return { status, source, links, piLinks, error: null };
   } catch (error) {
     const message = messageOf(error);
     warnings.push(`技能狀態無法檢查：${message}（${sourcePath}、${linkPath}）`);
     return {
       status: "unavailable",
       source: { path: sourcePath, exists: false, skills: [] },
-      links: {
-        path: linkPath,
-        exists: false,
-        symlinks: [],
-        broken: [],
-        missing: [],
-        conflicts: [],
-      },
+      links: emptySkillLinks(linkPath),
+      piLinks: piConfigured ? emptySkillLinks(piLinkPath) : null,
       error: message,
     };
   }
@@ -401,37 +431,40 @@ function pushSkillWarnings(
   source: SkillSourceHealth,
   links: SkillLinkHealth,
   warnings: string[],
+  label = "",
 ): void {
   if (status === "not_linked") {
     if (!links.exists) {
-      warnings.push(`技能尚未連結：找不到連結目錄 ${links.path}。執行 smilework link 建立連結。`);
+      warnings.push(
+        `${label}技能尚未連結：找不到連結目錄 ${links.path}。執行 smilework link 建立連結。`,
+      );
       return;
     }
     if (links.conflicts.length > 0) {
       warnings.push(
-        `技能連結位置已有同名實體資料夾：${links.conflicts.join("、")}，未覆蓋。`,
+        `${label}技能連結位置已有同名實體資料夾：${links.conflicts.join("、")}，未覆蓋。`,
       );
     }
     warnings.push(
-      `技能尚未連結：${source.skills.join("、")}。執行 smilework link 建立連結到 ${links.path}。`,
+      `${label}技能尚未連結：${source.skills.join("、")}。執行 smilework link 建立連結到 ${links.path}。`,
     );
     return;
   }
 
   if (status === "broken") {
-    warnings.push(`技能連結斷鏈：${links.broken.join("、")}。重新執行 smilework link 修復。`);
+    warnings.push(`${label}技能連結斷鏈：${links.broken.join("、")}。重新執行 smilework link 修復。`);
     return;
   }
 
   if (status === "partial") {
     if (links.conflicts.length > 0) {
       warnings.push(
-        `技能連結位置已有同名實體資料夾：${links.conflicts.join("、")}，未覆蓋。`,
+        `${label}技能連結位置已有同名實體資料夾：${links.conflicts.join("、")}，未覆蓋。`,
       );
     }
     if (links.missing.length > 0) {
       warnings.push(
-        `有 ${links.missing.length} 個技能尚未連結到 ${links.path}：${links.missing.join("、")}。執行 smilework link 建立連結。`,
+        `${label}有 ${links.missing.length} 個技能尚未連結到 ${links.path}：${links.missing.join("、")}。執行 smilework link 建立連結。`,
       );
     }
   }

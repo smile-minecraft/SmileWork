@@ -273,6 +273,7 @@ describe("linkSkills", () => {
       expect(second.overlaps).toEqual([
         {
           name: "shared",
+          host: "claude",
           globalSourcePath: globalShared,
           projectSourcePath: projectShared,
           globalLinkPath: globalLinkPathFor(home, "shared"),
@@ -311,6 +312,45 @@ describe("linkSkills", () => {
       expect(summary.results).toEqual([]);
       expect((await lstat(linkPath)).isSymbolicLink()).toBe(true);
       expect(existsSync(linkPath)).toBe(false);
+    });
+  });
+
+  test("偵測到 ~/.pi 時同時建立 Pi 技能連結", async () => {
+    await withTempDir("link-pi-global", async (root) => {
+      const { home } = await createLayout(root);
+      const source = await writeSkill(home, "alpha");
+      await mkdir(join(home, ".pi"), { recursive: true });
+
+      const summary = await linkSkills({ home });
+      expect(summary.hosts.map((host) => host.host)).toEqual(["claude", "pi"]);
+      expect(summary.results.map((result) => result.host)).toEqual(["claude", "pi"]);
+      await assertSymlinkTo(globalLinkPathFor(home, "alpha"), source);
+      await assertSymlinkTo(join(home, ".pi", "agent", "skills", "alpha"), source);
+    });
+  });
+
+  test("專案有 .pi 時建立專案層 Pi 連結", async () => {
+    await withTempDir("link-pi-project", async (root) => {
+      const { home, project } = await createLayout(root);
+      const source = await writeSkill(project, "project-only");
+      await mkdir(join(project, ".pi"), { recursive: true });
+
+      const summary = await linkSkills({ home, projectPath: project });
+      expect(summary.hosts.map((host) => host.host)).toEqual(["claude", "pi"]);
+      await assertSymlinkTo(projectLinkPathFor(project, "project-only"), source);
+      await assertSymlinkTo(join(project, ".pi", "skills", "project-only"), source);
+    });
+  });
+
+  test("明確指定 --host pi 時即使沒有 ~/.pi 也建立連結", async () => {
+    await withTempDir("link-pi-explicit", async (root) => {
+      const { home } = await createLayout(root);
+      const source = await writeSkill(home, "alpha");
+
+      const summary = await linkSkills({ home, hosts: ["pi"] });
+      expect(summary.hosts.map((host) => host.host)).toEqual(["pi"]);
+      expect(summary.results).toHaveLength(1);
+      await assertSymlinkTo(join(home, ".pi", "agent", "skills", "alpha"), source);
     });
   });
 

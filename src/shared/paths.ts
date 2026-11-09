@@ -41,6 +41,18 @@ export function claudeSkillsDir(home: string = homedir()): string {
   return join(home, ".claude", "skills");
 }
 
+export function piAgentDir(home: string = homedir()): string {
+  return join(home, ".pi", "agent");
+}
+
+export function piSkillsDir(home: string = homedir()): string {
+  return join(piAgentDir(home), "skills");
+}
+
+export function projectPiSkillsDir(projectPath: string): string {
+  return join(projectPath, ".pi", "skills");
+}
+
 /**
  * 把路徑正規化成 realpath。路徑尾端還不存在時，從最近存在的祖先取 realpath
  * 再把剩下的片段接回去；/var 這類 symlink 會在祖先層被解析。

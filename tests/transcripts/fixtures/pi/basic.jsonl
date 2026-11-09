@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"pi-fixture-1","timestamp":"2026-11-01T12:00:00.000Z","cwd":"/work/pi"}
+{"type":"model_change","id":"m1","parentId":null,"timestamp":"2026-11-01T12:00:00.100Z","provider":"local","modelId":"fixture"}
+{"type":"message","id":"u1","parentId":"m1","timestamp":"2026-11-01T12:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"請檢查 Pi 的紀錄"}]}}
+{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-11-01T12:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"先看檔案。"},{"type":"toolCall","id":"call-1","name":"read","arguments":{"path":"README.md"}}]}}
+{"type":"message","id":"t1","parentId":"a1","timestamp":"2026-11-01T12:00:03.000Z","message":{"role":"toolResult","toolCallId":"call-1","toolName":"read","content":[{"type":"text","text":"hello pi"}]}}
+{"type":"message","id":"a2","parentId":"t1","timestamp":"2026-11-01T12:00:04.000Z","message":{"role":"assistant","content":[{"type":"text","text":"完成。"}]}}

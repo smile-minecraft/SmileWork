@@ -340,3 +340,28 @@ describe("OpenCode adapter", () => {
     });
   });
 });
+
+describe("Pi adapter", () => {
+  test("解析 session、訊息、toolCall 與 toolResult，並保留 cwd", async () => {
+    await withTranscriptEnv("adapter-pi", async (context) => {
+      const env = {
+        ...context.env,
+        SMILEWORK_PI_SESSIONS_DIR: fixturePath("pi"),
+        SMILEWORK_TRANSCRIPTS_DISABLED_SOURCES: "claude,codex,opencode",
+      };
+      const report = buildTranscriptIndex({ env, dbPath: context.dbPath });
+      expect(report.errors).toEqual([]);
+
+      const entries = readIndexEntries(context.dbPath, "pi:pi-fixture-1");
+      expect(entries.map((entry) => entry.role)).toEqual(["user", "assistant", "tool", "tool", "assistant"]);
+      expect(entries.map((entry) => entry.turn)).toEqual([1, 1, 1, 1, 1]);
+      expect(entries.every((entry) => entry.source === "pi")).toBe(true);
+      expect(entries.every((entry) => entry.project_path === "/work/pi")).toBe(true);
+      expect(entries[0]?.text).toBe("請檢查 Pi 的紀錄");
+      expect(entries[2]?.tool_name).toBe("read");
+      expect(entries[2]?.text).toContain("README.md");
+      expect(entries[3]?.tool_name).toBe("read");
+      expect(entries[3]?.text).toBe("hello pi");
+    });
+  });
+});

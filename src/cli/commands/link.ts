@@ -1,20 +1,29 @@
 import type { Command } from "../command.ts";
 import { failureFromError } from "../../shared/result.ts";
 import { linkSkills } from "../../skill-link/link.ts";
-import type { SkillLinkResult, SkillLinkSummary } from "../../skill-link/types.ts";
+import type { SkillHost, SkillLinkResult, SkillLinkSummary } from "../../skill-link/types.ts";
 
-const USAGE = "用法：smilework link [--dry-run] [--project <path>]";
+const USAGE = "用法：smilework link [--dry-run] [--project <path>] [--host all|claude|pi]";
+
+type HostOption = SkillHost | "all";
 
 interface ParsedArgs {
   readonly dryRun: boolean;
   readonly projectPath: string | undefined;
+  readonly host: HostOption;
   readonly help: boolean;
   readonly error: string | undefined;
+}
+
+function parseHost(value: string): HostOption | undefined {
+  if (value === "all" || value === "claude" || value === "pi") return value;
+  return undefined;
 }
 
 function parseArgs(args: readonly string[]): ParsedArgs {
   let dryRun = false;
   let projectPath: string | undefined;
+  let host: HostOption = "all";
   let help = false;
   let error: string | undefined;
 
@@ -26,6 +35,21 @@ function parseArgs(args: readonly string[]): ParsedArgs {
     }
     if (arg === "--help" || arg === "-h") {
       help = true;
+      continue;
+    }
+    if (arg === "--host" || arg.startsWith("--host=")) {
+      const value = arg === "--host" ? args[index + 1] : arg.slice("--host=".length);
+      if (value === undefined || value.startsWith("--")) {
+        error = "--host 缺少值。";
+        continue;
+      }
+      if (arg === "--host") index += 1;
+      const parsed = parseHost(value);
+      if (parsed === undefined) {
+        error = "--host 只能是 all、claude 或 pi。";
+        continue;
+      }
+      host = parsed;
       continue;
     }
     if (arg === "--project" || arg.startsWith("--project=")) {
@@ -54,7 +78,7 @@ function parseArgs(args: readonly string[]): ParsedArgs {
     error = `不支援的參數：${arg}`;
   }
 
-  return { dryRun, projectPath, help, error };
+  return { dryRun, projectPath, host, help, error };
 }
 
 function layerLabel(result: SkillLinkResult): string {
@@ -62,7 +86,7 @@ function layerLabel(result: SkillLinkResult): string {
 }
 
 function resultLine(result: SkillLinkResult, dryRun: boolean): string {
-  const prefix = `[${layerLabel(result)}]`;
+  const prefix = `[${layerLabel(result)}/${result.host}]`;
   if (result.outcome === "conflict") {
     return `衝突 ${prefix} ${result.linkPath}：${result.reason ?? "未覆蓋"}（來源：${result.sourcePath}）`;
   }
@@ -73,8 +97,12 @@ function resultLine(result: SkillLinkResult, dryRun: boolean): string {
 }
 
 function printSummary(summary: SkillLinkSummary): void {
-  console.log(`全域技能連結：${summary.globalLinkRoot}`);
-  if (summary.projectLinkRoot) console.log(`專案技能連結：${summary.projectLinkRoot}`);
+  for (const target of summary.hosts) {
+    console.log(`[${target.host}] 全域技能連結：${target.globalLinkRoot}`);
+    if (target.projectLinkRoot) {
+      console.log(`[${target.host}] 專案技能連結：${target.projectLinkRoot}`);
+    }
+  }
   if (summary.dryRun) console.log("（dry-run：只列出計畫，不寫入）");
 
   for (const source of summary.sources) {
@@ -92,7 +120,7 @@ function printSummary(summary: SkillLinkSummary): void {
 
   for (const overlap of summary.overlaps) {
     console.log(
-      `同名技能 ${overlap.name}：全域 ${overlap.globalLinkPath} -> ${overlap.globalSourcePath}；專案 ${overlap.projectLinkPath} -> ${overlap.projectSourcePath}（兩層各自使用獨立目標，互不覆蓋）`,
+      `同名技能 ${overlap.name}（${overlap.host}）：全域 ${overlap.globalLinkPath} -> ${overlap.globalSourcePath}；專案 ${overlap.projectLinkPath} -> ${overlap.projectSourcePath}（兩層各自使用獨立目標，互不覆蓋）`,
     );
   }
 
@@ -110,7 +138,8 @@ export const command: Command = {
     if (parsed.help) {
       console.log(USAGE);
       console.log("  --dry-run          只列出計畫，不建立 symlink");
-      console.log("  --project <path>   一併把專案層 .agents/skills 連到 <repo>/.claude/skills");
+      console.log("  --project <path>   一併把專案層 .agents/skills 連到 <repo>/.claude/skills 與 <repo>/.pi/skills");
+      console.log("  --host <名稱>      all（預設）、claude 或 pi；預設會處理已安裝的宿主");
       return 0;
     }
     if (parsed.error) {
@@ -123,6 +152,7 @@ export const command: Command = {
       const summary = await linkSkills({
         ...(parsed.projectPath ? { projectPath: parsed.projectPath } : {}),
         ...(parsed.dryRun ? { dryRun: true } : {}),
+        ...(parsed.host === "all" ? {} : { hosts: [parsed.host] }),
       });
       printSummary(summary);
       return summary.results.some((result) => result.outcome === "conflict") ? 1 : 0;
