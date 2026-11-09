@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 import { openDatabase } from "../db/index.ts";
 import type { ProjectContext } from "../domain/project.ts";
 import { resolveActor, actorHint } from "../project/actor.ts";
-import { registerProject } from "../project/registry.ts";
+import { preferRegisteredAncestor, registerProject } from "../project/registry.ts";
 import { resolveProject } from "../project/resolve.ts";
 import { ERROR_CODES, SmileworkError } from "../shared/errors.ts";
 import type { ToolContext } from "./types.ts";
@@ -34,17 +34,25 @@ export function createToolContext(options: CreateToolContextOptions = {}): ToolC
     return project;
   };
 
+  const resolve = (explicitPath?: string): ProjectContext => {
+    const base = resolveProject({ explicitPath, env, cwd });
+    const preferred = base.commonDir.startsWith("path:")
+      ? preferRegisteredAncestor(db(), base)
+      : base;
+    return register(preferred);
+  };
+
   const actor = resolveActor(env);
   return {
     actor,
     actorHint: actorHint(actor),
     db,
     resolveProject(explicitPath?: string): ProjectContext {
-      return register(resolveProject({ explicitPath, env, cwd }));
+      return resolve(explicitPath);
     },
     tryResolveProject(explicitPath?: string): ProjectContext | null {
       try {
-        return register(resolveProject({ explicitPath, env, cwd }));
+        return resolve(explicitPath);
       } catch (error) {
         if (isProjectResolutionError(error)) return null;
         throw error;

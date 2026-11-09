@@ -46,6 +46,44 @@ function toWorktree(row: WorktreeRow): ProjectWorktree {
   };
 }
 
+/**
+ * 非 git 的路徑專案只認目前路徑本身。工具與 status 在解析後再用這個函式
+ * 找已登記的上層路徑專案，讓 X/plugins 接回 X，而不是另一個 projectId。
+ * 只處理 `path:` 專案；git 與舊 `.ultrawork` 專案在 resolve 階段就已經確定。
+ */
+export function preferRegisteredAncestor(
+  db: Database,
+  context: ProjectContext,
+): ProjectContext {
+  if (!context.commonDir.startsWith("path:")) return context;
+
+  const current = canonicalizePath(context.worktreePath);
+  const rows = db
+    .query<ProjectRow, []>("SELECT * FROM projects WHERE common_dir LIKE 'path:%'")
+    .all();
+
+  let best: ProjectRow | null = null;
+  let bestRoot = "";
+  for (const row of rows) {
+    const root = canonicalizePath(row.root_path);
+    // `/` 這種根目錄不拿來當所有路徑的上層，避免整個檔案系統都變成同一個專案。
+    if (root === "/") continue;
+    if (current !== root && !current.startsWith(`${root}/`)) continue;
+    if (best === null || root.length > bestRoot.length) {
+      best = row;
+      bestRoot = root;
+    }
+  }
+
+  if (best === null) return context;
+  return {
+    projectId: best.project_id,
+    worktreePath: current,
+    commonDir: best.common_dir,
+    rootPath: best.root_path,
+  };
+}
+
 export function getProject(db: Database, projectId: string): ProjectRecord | null {
   const row = db
     .query<ProjectRow, [string]>("SELECT * FROM projects WHERE project_id = ?")

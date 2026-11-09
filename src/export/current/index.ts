@@ -6,6 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { PRODUCER_VERSION } from "../../export/v3/index.ts";
 import type { Manifest } from "../../import/types.ts";
 import { WarningCollector } from "../../import/warnings.ts";
+import { preferRegisteredAncestor } from "../../project/registry.ts";
 import { resolveProject } from "../../project/resolve.ts";
 import { expandHome, smileworkDatabasePath, smileworkHome } from "../../shared/paths.ts";
 import { buildCurrentPackage } from "./build.ts";
@@ -128,10 +129,13 @@ function selectProject(db: Database, options: ExportCurrentOptions): string {
   if (requested !== undefined && requested !== "") {
     if (known.has(requested)) return requested;
     try {
-      const context = resolveProject({
-        explicitPath: requested,
-        env: options.env ?? process.env,
-      });
+      const context = preferRegisteredAncestor(
+        db,
+        resolveProject({
+          explicitPath: requested,
+          env: options.env ?? process.env,
+        }),
+      );
       if (known.has(context.projectId)) return context.projectId;
     } catch {
       // 不是路徑時，下面的錯誤會說明找不到專案。
@@ -144,7 +148,10 @@ function selectProject(db: Database, options: ExportCurrentOptions): string {
   }
 
   try {
-    const context = resolveProject({ env: options.env ?? process.env });
+    const context = preferRegisteredAncestor(
+      db,
+      resolveProject({ env: options.env ?? process.env }),
+    );
     if (known.has(context.projectId)) return context.projectId;
   } catch {
     // 目前目錄不是 git repo 時，只能靠單一專案或 --project。

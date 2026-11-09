@@ -11,6 +11,7 @@ export {
   findProjectByPath,
   getProject,
   listProjects,
+  preferRegisteredAncestor,
   registerProject,
   relinkProject,
   type RelinkProjectOptions,

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from 
 import { join } from "node:path";
 import { openDatabase } from "../../src/db/index.ts";
 import { runTool } from "../../src/mcp/result.ts";
+import { registerProject, resolveProject } from "../../src/project/index.ts";
 import { inspectStatus } from "../../src/status/index.ts";
 import { tool } from "../../src/tools/status/status.ts";
 import { SERVER_NAME, SERVER_VERSION } from "../../src/shared/version.ts";
@@ -128,6 +129,28 @@ describe("健康狀態", () => {
       expect(report.project.status).toBe("resolved");
       expect(report.project.projectId).toMatch(/^[0-9a-f]{16}$/);
       expect(report.project.commonDir).toBe(`path:${realpathSync(plain)}`);
+    });
+  });
+
+  test("已登記的上層路徑專案在子資料夾也會回報同一個 projectId", async () => {
+    await withStatusHome("status-project-ancestor", async ({ env, home, root }) => {
+      const projectRoot = join(root, "X");
+      const nested = join(projectRoot, "plugins");
+      mkdirSync(nested, { recursive: true });
+
+      const db = openDatabase({ home });
+      try {
+        registerProject(db, resolveProject({ explicitPath: projectRoot, env, cwd: root }));
+      } finally {
+        db.close();
+      }
+
+      const report = inspectStatus({ env, cwd: nested });
+      expect(report.project.status).toBe("resolved");
+      expect(report.project.projectId).toBe(
+        resolveProject({ explicitPath: projectRoot, env, cwd: root }).projectId,
+      );
+      expect(report.project.worktreePath).toBe(realpathSync(nested));
     });
   });
 

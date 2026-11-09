@@ -10,7 +10,7 @@ SmileWork 是跨代理共用的本機 MCP 伺服器。它透過 stdio 連上 Cla
 - 三種工具 profile：`worker` 12 個、`curator` 15 個、`full` 21 個。
 - 工作流程：建立、更新、依賴、可開始清單、審查、結案。結案會檢查驗收結果、證據、依賴與高風險核准。
 - 跨代理接續：建立工作時記下 git HEAD，brief 直接列出 `git diff <baseCommit>`；`work_update` 用 `evidence.kind=handoff` 留交接、`kind=ruling` 留決定，換代理接手時看得到。
-- 非 git 專案：以正規化絕對路徑建立專案身分；有舊 `.ultrawork/tasks.json` 時接回原本的 projectId。`Test-Server-Folia` 這類資料夾不需要額外設定。
+- 非 git 專案：以正規化絕對路徑建立專案身分；有舊 `.ultrawork/tasks.json` 時接回原本的 projectId。先在 `X` 建工作後，從 `X/plugins` 開啟會接回同一個專案；`/` 與系統暫存根目錄不會建立路徑專案。`Test-Server-Folia` 這類資料夾不需要額外設定。
 - 伺服器驗證：`verify_run` 只能執行白名單 runner（`bun`、`npm`、`pytest`、`cargo`、`gradle`、`swift`），輸出寫成可追查的伺服器證據。
 - 知識：寫入前檢查、版本、歷史、還原、退役與升級。知識可以標註 `scopePaths`，`work_get` 產生 brief 時自動帶入相關的 decision／pitfall。
 - 訊號：記錄糾正、失敗、修好、審查退回與教訓。

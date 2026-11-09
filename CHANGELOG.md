@@ -18,6 +18,7 @@
 
 - `export-v3` 在 `--project` 與 `--global` 指向同一個 `.ultrawork` 時，只讀一次並以 project 層匯出，不再產生重複的知識、訊號與 raw 檔。
 - `import` 在套用階段失敗時，CLI 回非零結束碼；補上回歸測試。
+- 非 git 的路徑專案會接回已登記的上層資料夾，先在 `X` 建工作、之後從 `X/plugins` 開啟時不會變成另一個專案。`/` 與系統暫存根目錄不建立路徑專案。
 - `work_update` 的 `output` 證據缺少 `path` 時，下一步會說明改用 `kind: note` 或 `verify_run`。
 - `work_complete` 在非 `review` 狀態被呼叫時，下一步會給出實際的 `work_review` 與 `work_complete` 版本號指令。
 - 資料庫 JSON 欄位損壞、冪等鍵快取回放內容不完整時，回 `INTERNAL_ERROR` 並附實體與欄位，不再假裝成功或回空值。

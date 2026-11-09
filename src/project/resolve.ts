@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import type { ProjectContext } from "../domain/project.ts";
 import { ERROR_CODES, SmileworkError } from "../shared/errors.ts";
@@ -57,12 +57,24 @@ function ensureDirectory(path: string, source: ProjectSource): void {
   }
 }
 
+function isBroadRoot(path: string): boolean {
+  return (
+    path === "/" ||
+    path === canonicalizePath("/tmp") ||
+    path === canonicalizePath(tmpdir())
+  );
+}
+
 /**
  * 專案解析順序：工具參數、SMILEWORK_PROJECT、程序 cwd。
  * 先找 git 根目錄；不是 git repo 時，依序改用：
  * 1. 上層 `.ultrawork/tasks.json` 記錄的舊 projectId，接回匯入的專案。
- * 2. 正規化絕對路徑雜湊出的專案身分。
- * 同一條路徑不管從哪個子資料夾或尾斜線進來，都會得到相同 projectId。
+ * 2. 正規化絕對路徑雜湊出的專案身分。這一層只認目前路徑本身，不會往上找。
+ *
+ * 工具與 status 會在解析後再到資料庫找已登記的上層路徑專案
+ * （`preferRegisteredAncestor`），所以先在 X 建工作、之後在 X/plugins 開啟時
+ * 會接回 X。`resolveProject` 本身不碰資料庫，才能給唯讀與 CLI 解析共用。
+ * 檔案系統根目錄與系統暫存根目錄不建立路徑專案，避免冒出無意義的專案。
  */
 export function resolveProject(options: ResolveProjectOptions = {}): ProjectContext {
   const env = options.env ?? process.env;
@@ -82,6 +94,15 @@ export function resolveProject(options: ResolveProjectOptions = {}): ProjectCont
   }
 
   const canonical = canonicalizePath(path);
+  if (isBroadRoot(canonical)) {
+    throw new SmileworkError(
+      ERROR_CODES.projectRequired,
+      `這個位置太廣泛，不能當成專案根目錄：${canonical}`,
+      "在實際的專案資料夾內執行，或用 SMILEWORK_PROJECT 指定專案路徑。",
+      { path: canonical, source: source.kind },
+    );
+  }
+
   const legacy = findLegacyProjectIdentity(canonical, env);
   if (legacy) {
     return {

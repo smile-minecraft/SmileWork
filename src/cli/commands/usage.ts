@@ -1,5 +1,6 @@
 import { openDatabase } from "../../db/index.ts";
 import { resolveActor, actorHint } from "../../project/actor.ts";
+import { preferRegisteredAncestor } from "../../project/registry.ts";
 import { tryResolveProject, resolveProject } from "../../project/resolve.ts";
 import type { Command } from "../command.ts";
 import { newId } from "../../shared/hash.ts";
@@ -163,17 +164,16 @@ function recordUsage(input: RecordInput): UsageRecord {
   const env = process.env;
   const actor = resolveActor(env);
 
-  let projectId: string | null = null;
-  if (input.projectPath !== null) {
-    projectId = resolveProject({ explicitPath: input.projectPath, env }).projectId;
-  } else {
-    projectId = tryResolveProject({ env })?.projectId ?? null;
-  }
-
+  const base =
+    input.projectPath !== null
+      ? resolveProject({ explicitPath: input.projectPath, env })
+      : tryResolveProject({ env });
+  const db = openDatabase({ env });
   const usageId = newId("usage");
   const createdAt = nowIso();
-  const db = openDatabase({ env });
+  let projectId: string | null = null;
   try {
+    projectId = base === null ? null : preferRegisteredAncestor(db, base).projectId;
     db.query(
       `INSERT INTO usage_events (
          usage_id, project_id, layer, knowledge_id, version, action, actor,

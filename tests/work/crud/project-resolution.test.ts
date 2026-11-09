@@ -33,6 +33,45 @@ describe("非 git 專案的工作工具", () => {
     });
   });
 
+  test("先在 X 建工作，之後在 X/plugins 開啟會接回同一個專案", async () => {
+    await withTempHome("work-ancestor-project", async (home) => {
+      await withTempDir("work-ancestor-cwd", async (root) => {
+        const projectRoot = join(root, "X");
+        const nested = join(projectRoot, "plugins");
+        mkdirSync(nested, { recursive: true });
+
+        const createTool = toolByName("work_create");
+        if (!createTool) throw new Error("registry 缺少 work_create。");
+        const listTool = toolByName("work_list");
+        if (!listTool) throw new Error("registry 缺少 work_list。");
+        const env: NodeJS.ProcessEnv = {
+          ...process.env,
+          SMILEWORK_HOME: home,
+          SMILEWORK_ACTOR: "build",
+        };
+        delete env.SMILEWORK_PROJECT;
+
+        const created = parse(
+          await runTool(createTool, { title: "X 的工作" }, { env, cwd: projectRoot }),
+        );
+        expect(created.ok).toBe(true);
+        const projectId = created.data.work.projectId;
+
+        const listed = parse(await runTool(listTool, {}, { env, cwd: nested }));
+        expect(listed.ok).toBe(true);
+        expect(listed.data.items.map((item: { id: string }) => item.id)).toContain(
+          created.data.work.id,
+        );
+
+        const createdFromNested = parse(
+          await runTool(createTool, { title: "X/plugins 的工作" }, { env, cwd: nested }),
+        );
+        expect(createdFromNested.ok).toBe(true);
+        expect(createdFromNested.data.work.projectId).toBe(projectId);
+      });
+    });
+  });
+
   test("有 .ultrawork 的目錄會接到舊 projectId，而不是建立新專案", async () => {
     await withTempHome("work-legacy-project", async (home) => {
       await withTempDir("work-legacy-cwd", async (cwd) => {

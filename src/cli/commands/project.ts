@@ -1,6 +1,11 @@
 import type { Command } from "../command.ts";
 import { openDatabase } from "../../db/index.ts";
-import { listProjects, registerProject, relinkProject } from "../../project/index.ts";
+import {
+  listProjects,
+  preferRegisteredAncestor,
+  registerProject,
+  relinkProject,
+} from "../../project/index.ts";
 import type { ProjectRecord } from "../../domain/project.ts";
 import { resolveProject } from "../../project/resolve.ts";
 import { failureFromError } from "../../shared/result.ts";
@@ -61,7 +66,8 @@ function runList(args: ParsedArgs): number {
   try {
     const projectPath = args.values.get("project");
     if (projectPath) {
-      registerProject(db, resolveProject({ explicitPath: projectPath }));
+      const base = resolveProject({ explicitPath: projectPath });
+      registerProject(db, preferRegisteredAncestor(db, base));
     }
 
     const projects = listProjects(db);

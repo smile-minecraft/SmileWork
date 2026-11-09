@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { Actor } from "../domain/actor.ts";
 import { loadSmileworkConfig, type SmileworkConfig } from "../mcp/profiles.ts";
 import { actorHint, resolveActor } from "../project/actor.ts";
+import { preferRegisteredAncestor } from "../project/registry.ts";
 import { resolveProject } from "../project/resolve.ts";
 import { SmileworkError } from "../shared/errors.ts";
 import {
@@ -130,7 +131,7 @@ export function inspectStatus(options: InspectStatusOptions = {}): StatusReport 
   return {
     version: { name: SERVER_NAME, version: SERVER_VERSION },
     database: inspectDatabase(pathsEnv, warnings),
-    project: inspectProject(env, cwd, warnings),
+    project: inspectProject(pathsEnv, cwd, warnings),
     actor: { ...actor, hint },
     profile: {
       name: config.profile,
@@ -258,13 +259,33 @@ function readSchemaVersion(db: Database): number {
   }
 }
 
+function preferRegisteredProject(
+  env: NodeJS.ProcessEnv,
+  project: ReturnType<typeof resolveProject>,
+): ReturnType<typeof resolveProject> {
+  if (!project.commonDir.startsWith("path:")) return project;
+  const databasePath = smileworkDatabasePath(env);
+  if (!existsSync(databasePath)) return project;
+
+  let db: Database | null = null;
+  try {
+    db = new Database(databasePath, { readonly: true });
+    return preferRegisteredAncestor(db, project);
+  } catch {
+    // 資料庫還沒建立或無法讀取時，維持路徑解析的結果；doctor 會另外回報資料庫狀態。
+    return project;
+  } finally {
+    db?.close();
+  }
+}
+
 function inspectProject(
   env: NodeJS.ProcessEnv,
   cwd: string,
   warnings: string[],
 ): ProjectHealth {
   try {
-    const project = resolveProject({ env, cwd });
+    const project = preferRegisteredProject(env, resolveProject({ env, cwd }));
     return {
       status: "resolved",
       projectId: project.projectId,

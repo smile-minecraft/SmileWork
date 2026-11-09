@@ -1,11 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveProject, requireProject } from "../../src/project/index.ts";
+import { openDatabase } from "../../src/db/index.ts";
+import {
+  preferRegisteredAncestor,
+  registerProject,
+  resolveProject,
+  requireProject,
+} from "../../src/project/index.ts";
 import { projectIdFromPath } from "../../src/shared/hash.ts";
 import { createGitRepo, createGitWorktree } from "../helpers/git.ts";
-import { withTempDir } from "../helpers/temp.ts";
+import { withTempDir, withTempHome } from "../helpers/temp.ts";
 
 function expectedProjectId(commonDir: string): string {
   return createHash("sha256").update(realpathSync(commonDir)).digest("hex").slice(0, 16);
@@ -125,6 +132,52 @@ describe("專案解析", () => {
         expect.objectContaining({ code: "PROJECT_NOT_FOUND" }),
       );
     });
+  });
+
+  test("已登記的路徑專案會接回上層專案，子資料夾不產生新 projectId", async () => {
+    await withTempHome("resolve-registered-ancestor", async (home) => {
+      await withTempDir("resolve-ancestor-root", async (root) => {
+        const projectRoot = join(root, "X");
+        const nested = join(projectRoot, "plugins");
+        mkdirSync(nested, { recursive: true });
+
+        const db = openDatabase({ home });
+        try {
+          const parent = resolveProject({ explicitPath: projectRoot, env: {}, cwd: root });
+          registerProject(db, parent);
+
+          const child = resolveProject({ explicitPath: nested, env: {}, cwd: root });
+          expect(child.projectId).not.toBe(parent.projectId);
+
+          const preferred = preferRegisteredAncestor(db, child);
+          expect(preferred.projectId).toBe(parent.projectId);
+          expect(preferred.worktreePath).toBe(realpathSync(nested));
+          expect(preferred.rootPath).toBe(realpathSync(projectRoot));
+
+          registerProject(db, preferred);
+          const rows = db
+            .query<{ worktree_path: string }, [string]>(
+              "SELECT worktree_path FROM project_worktrees WHERE project_id = ? ORDER BY worktree_path",
+            )
+            .all(parent.projectId);
+          expect(rows.map((row) => row.worktree_path)).toEqual([
+            realpathSync(projectRoot),
+            realpathSync(nested),
+          ]);
+        } finally {
+          db.close();
+        }
+      });
+    });
+  });
+
+  test("檔案系統根目錄與系統暫存根目錄不建立路徑專案", () => {
+    expect(() => resolveProject({ explicitPath: "/", env: {}, cwd: "/" })).toThrow(
+      expect.objectContaining({ code: "PROJECT_REQUIRED" }),
+    );
+    expect(() => resolveProject({ explicitPath: tmpdir(), env: {}, cwd: "/" })).toThrow(
+      expect.objectContaining({ code: "PROJECT_REQUIRED" }),
+    );
   });
 
   test("有 .ultrawork/tasks.json 的非 git 目錄會接回舊 projectId", async () => {

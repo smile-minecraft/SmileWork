@@ -25,7 +25,7 @@ bun /Users/you/src/SmileWork/src/cli/index.ts mcp
 | `SMILEWORK_MODEL` | 建議 | 模型名稱，和 actor 一起記在證據與事件裡。 |
 | `SMILEWORK_PI_SESSIONS_DIR` | 否 | Pi 的 session 資料夾，預設 `~/.pi/agent/sessions`。 |
 
-工具需要可解析的專案。若宿主的工作目錄不在目標專案裡，請明確設定 `SMILEWORK_PROJECT`。非 git 資料夾也有穩定的路徑身分；有舊 `.ultrawork/tasks.json` 時會接回匯入時的 projectId。
+工具需要可解析的專案。若宿主的工作目錄不在目標專案裡，請明確設定 `SMILEWORK_PROJECT`。非 git 資料夾也有穩定的路徑身分；有舊 `.ultrawork/tasks.json` 時會接回匯入時的 projectId。第一次在 `X` 建立工作後，之後在 `X/plugins` 這類子資料夾開啟會接回同一個專案；檔案系統根目錄與系統暫存根目錄不建立路徑專案。
 
 ## 跨代理接續
 
