@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { migrationsDirectory, openDatabase } from "../../src/db/index.ts";
-import { withTempHome } from "../helpers/temp.ts";
+import { migrate, migrationsDirectory, openDatabase } from "../../src/db/index.ts";
+import { withTempDir, withTempHome } from "../helpers/temp.ts";
 
 const REQUIRED_TABLES = [
   "events",
@@ -114,6 +115,166 @@ describe("資料庫與 migration", () => {
         expect(existsSync(join(home, "smilework.db"))).toBe(true);
       } finally {
         db.close();
+      }
+    });
+  });
+
+  test("每個已套用的 migration 都記錄內容雜湊", async () => {
+    await withTempHome("migrate-hash-recorded", async (home) => {
+      const db = openDatabase({ home });
+      try {
+        const rows = db
+          .query<{ version: number; sha256: string | null }, []>(
+            "SELECT version, sha256 FROM schema_migrations ORDER BY version",
+          )
+          .all();
+        expect(rows.length).toBeGreaterThan(0);
+        for (const row of rows) {
+          expect(row.sha256).toMatch(/^[a-f0-9]{64}$/);
+        }
+      } finally {
+        db.close();
+      }
+    });
+  });
+
+  test("已套用的 migration 被修改後，再次啟動會回 MIGRATION_HASH_MISMATCH", async () => {
+    await withTempDir("migrate-hash-mismatch", async (dir) => {
+      const migrations = join(dir, "migrations");
+      mkdirSync(migrations);
+      const file = join(migrations, "0001_test.sql");
+      writeFileSync(file, "CREATE TABLE sample (id INTEGER PRIMARY KEY) STRICT;\n", "utf8");
+      const dbPath = join(dir, "db.sqlite");
+
+      const first = new Database(dbPath);
+      migrate(first, migrations);
+      first.close();
+
+      writeFileSync(file, "CREATE TABLE sample (id INTEGER PRIMARY KEY, name TEXT) STRICT;\n", "utf8");
+      const second = new Database(dbPath);
+      try {
+        expect(() => migrate(second, migrations)).toThrow(
+          expect.objectContaining({ code: "MIGRATION_HASH_MISMATCH" }),
+        );
+        const count = second
+          .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM schema_migrations")
+          .get();
+        expect(count?.count).toBe(1);
+      } finally {
+        second.close();
+      }
+    });
+  });
+
+  test("已套用的 migration 被刪除或改名時會明確報錯", async () => {
+    await withTempDir("migrate-hash-missing", async (dir) => {
+      const migrations = join(dir, "migrations");
+      mkdirSync(migrations);
+      const file = join(migrations, "0001_test.sql");
+      writeFileSync(file, "CREATE TABLE sample (id INTEGER PRIMARY KEY) STRICT;\n", "utf8");
+      const dbPath = join(dir, "db.sqlite");
+
+      const first = new Database(dbPath);
+      migrate(first, migrations);
+      first.close();
+
+      renameSync(file, join(migrations, "0001_renamed.sql"));
+      const second = new Database(dbPath);
+      try {
+        expect(() => migrate(second, migrations)).toThrow(
+          expect.objectContaining({ code: "MIGRATION_RENAMED" }),
+        );
+      } finally {
+        second.close();
+      }
+
+      unlinkSync(join(migrations, "0001_renamed.sql"));
+      const third = new Database(dbPath);
+      try {
+        expect(() => migrate(third, migrations)).toThrow(
+          expect.objectContaining({ code: "MIGRATION_FILE_MISSING" }),
+        );
+      } finally {
+        third.close();
+      }
+    });
+  });
+
+  test("舊資料庫沒有雜湊時會補記目前檔案的雜湊", async () => {
+    await withTempDir("migrate-hash-backfill", async (dir) => {
+      const migrations = join(dir, "migrations");
+      mkdirSync(migrations);
+      const file = join(migrations, "0001_test.sql");
+      writeFileSync(file, "CREATE TABLE sample (id INTEGER PRIMARY KEY) STRICT;\n", "utf8");
+      const dbPath = join(dir, "db.sqlite");
+
+      const db = new Database(dbPath);
+      try {
+        db.exec(`
+          CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+          ) STRICT;
+          CREATE TABLE sample (id INTEGER PRIMARY KEY) STRICT;
+          INSERT INTO schema_migrations (version, name, applied_at)
+          VALUES (1, '0001_test.sql', '2026-01-01T00:00:00.000Z');
+        `);
+
+        expect(migrate(db, migrations)).toBe(0);
+        const row = db
+          .query<{ sha256: string | null }, [number]>(
+            "SELECT sha256 FROM schema_migrations WHERE version = ?",
+          )
+          .get(1);
+        expect(row?.sha256).toMatch(/^[a-f0-9]{64}$/);
+      } finally {
+        db.close();
+      }
+    });
+  });
+
+  test("雜湊不符時不會套用後面的新 migration", async () => {
+    await withTempDir("migrate-hash-stops", async (dir) => {
+      const migrations = join(dir, "migrations");
+      mkdirSync(migrations);
+      const firstFile = join(migrations, "0001_first.sql");
+      writeFileSync(firstFile, "CREATE TABLE first_table (id INTEGER PRIMARY KEY) STRICT;\n", "utf8");
+      writeFileSync(
+        join(migrations, "0002_second.sql"),
+        "CREATE TABLE second_table (id INTEGER PRIMARY KEY) STRICT;\n",
+        "utf8",
+      );
+      const dbPath = join(dir, "db.sqlite");
+
+      const first = new Database(dbPath);
+      migrate(first, migrations);
+      first.close();
+
+      writeFileSync(firstFile, "CREATE TABLE first_table (id INTEGER PRIMARY KEY, note TEXT) STRICT;\n", "utf8");
+      writeFileSync(
+        join(migrations, "0003_third.sql"),
+        "CREATE TABLE third_table (id INTEGER PRIMARY KEY) STRICT;\n",
+        "utf8",
+      );
+
+      const second = new Database(dbPath);
+      try {
+        expect(() => migrate(second, migrations)).toThrow(
+          expect.objectContaining({ code: "MIGRATION_HASH_MISMATCH" }),
+        );
+        const tables = second
+          .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'")
+          .all()
+          .map((row) => row.name);
+        expect(tables).not.toContain("third_table");
+        const versions = second
+          .query<{ version: number }, []>("SELECT version FROM schema_migrations ORDER BY version")
+          .all()
+          .map((row) => row.version);
+        expect(versions).toEqual([1, 2]);
+      } finally {
+        second.close();
       }
     });
   });
