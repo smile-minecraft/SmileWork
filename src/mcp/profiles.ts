@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { tryResolveProject } from "../project/resolve.ts";
 import { parseJsonc } from "../shared/jsonc.ts";
 import { smileworkHome } from "../shared/paths.ts";
-import { TOOL_NAMES } from "./registry.ts";
+import { CURATOR_TOOL_NAMES, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tool-names.ts";
 
 export const PROFILE_NAMES = ["worker", "curator", "full"] as const;
 export type ProfileName = (typeof PROFILE_NAMES)[number];
@@ -23,39 +23,6 @@ export const PROFILE_TOOL_COUNTS: Readonly<Record<ProfileName, number>> = {
   curator: 15,
   full: 21,
 };
-
-const WORKER_TOOL_NAMES = [
-  "work_create",
-  "work_get",
-  "work_list",
-  "work_ready",
-  "work_update",
-  "work_complete",
-  "work_review",
-  "verify_run",
-  "status",
-  "signal_note",
-  "knowledge_search",
-  "knowledge_read",
-] as const;
-
-const CURATOR_TOOL_NAMES = [
-  "signal_note",
-  "signal_list",
-  "signal_mark",
-  "knowledge_search",
-  "knowledge_read",
-  "knowledge_write",
-  "knowledge_retire",
-  "knowledge_promote",
-  "knowledge_history",
-  "knowledge_revert",
-  "transcript_search",
-  "transcript_read",
-  "work_get",
-  "work_list",
-  "status",
-] as const;
 
 export const PROFILE_TOOLS: Readonly<Record<ProfileName, readonly string[]>> = {
   worker: WORKER_TOOL_NAMES,
@@ -221,6 +188,19 @@ function readDisabledTools(value: unknown, label: string, warnings: string[]): s
   return names;
 }
 
+/** 未知名稱不影響工具清單，但要留警告，避免使用者以為工具已停用。 */
+function warnUnknownDisabledTools(
+  names: readonly string[],
+  label: string,
+  warnings: string[],
+): void {
+  const known = new Set(TOOL_NAMES);
+  const unknown = [...new Set(names.filter((name) => !known.has(name)))];
+  if (unknown.length > 0) {
+    warnings.push(`${label}的 disabledTools 有未知工具：${unknown.join("、")}，已忽略。`);
+  }
+}
+
 function warnUnknownKeys(
   values: Record<string, unknown>,
   allowed: readonly string[],
@@ -253,6 +233,7 @@ export function loadSmileworkConfig(options: LoadConfigOptions = {}): SmileworkC
     "全域設定",
     warnings,
   );
+  warnUnknownDisabledTools(globalDisabled, "全域設定", warnings);
 
   const envProfile = readProfile(
     env.SMILEWORK_PROFILE?.trim() === "" ? undefined : env.SMILEWORK_PROFILE,
@@ -289,6 +270,7 @@ export function loadSmileworkConfig(options: LoadConfigOptions = {}): SmileworkC
     "專案設定",
     warnings,
   );
+  warnUnknownDisabledTools(projectDisabled, "專案設定", warnings);
 
   const disabledTools = [...new Set([...globalDisabled, ...projectDisabled])];
 

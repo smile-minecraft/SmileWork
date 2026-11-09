@@ -15,6 +15,7 @@ export const WORK_ERROR_CODES = {
   reviewStale: "REVIEW_STALE",
   reviewerIsOwner: "REVIEWER_IS_OWNER",
   serverEvidenceRequired: "SERVER_EVIDENCE_REQUIRED",
+  serverEvidenceFailed: "SERVER_EVIDENCE_FAILED",
   dependencyNotDone: "DEPENDENCY_NOT_DONE",
   invalidTransition: "INVALID_TRANSITION",
   idempotencyConflict: "IDEMPOTENCY_CONFLICT",
@@ -32,6 +33,10 @@ export interface GateIssue {
 export interface EvidenceReference {
   evidenceId: string;
   serverIssued: boolean;
+  /** 伺服器驗證的結束碼；null 表示沒有記錄（舊資料）或逾時。 */
+  exitCode: number | null;
+  /** verify_run 逾時時為 true；舊資料或沒有 details 時為 false。 */
+  timedOut: boolean;
 }
 
 export interface DependencyReference {
@@ -63,6 +68,7 @@ const CODE_PRIORITY: Record<string, number> = {
   REVIEWER_IS_OWNER: 4,
   REVIEW_STALE: 5,
   SERVER_EVIDENCE_REQUIRED: 6,
+  SERVER_EVIDENCE_FAILED: 6,
   WORK_NOT_FOUND: 7,
   VERSION_CONFLICT: 7,
   IDEMPOTENCY_CONFLICT: 7,
@@ -222,8 +228,10 @@ function dependencyIssue(dependencies: readonly DependencyReference[]): GateIssu
   };
 }
 
-function hasServerEvidence(evidence: readonly EvidenceReference[]): boolean {
-  return evidence.some((item) => item.serverIssued);
+/** 沒有結束碼的舊證據視為可用；逾時或非 0 結束碼則視為失敗。 */
+function isSuccessfulServerEvidence(item: EvidenceReference): boolean {
+  if (item.timedOut) return false;
+  return item.exitCode === null || item.exitCode === 0;
 }
 
 function highRiskReviewIssues(
@@ -265,12 +273,27 @@ function highRiskReviewIssues(
     });
   }
 
-  if (!hasServerEvidence(evidence)) {
+  const serverEvidence = evidence.filter((item) => item.serverIssued);
+  if (serverEvidence.length === 0) {
     issues.push({
       code: WORK_ERROR_CODES.serverEvidenceRequired,
       message: "高風險工作需要至少一個伺服器簽發的證據。",
       nextAction: "先用 verify_run 取得 serverIssued 證據，再重新結案。",
       data: { risk: work.risk },
+    });
+  } else if (!serverEvidence.some(isSuccessfulServerEvidence)) {
+    issues.push({
+      code: WORK_ERROR_CODES.serverEvidenceFailed,
+      message: "高風險工作的伺服器證據存在，但全部失敗或逾時，不能支撐結案。",
+      nextAction: "重新執行 verify_run，取得成功（exitCode 0 且未逾時）的伺服器證據後再結案。",
+      data: {
+        risk: work.risk,
+        evidence: serverEvidence.map((item) => ({
+          evidenceId: item.evidenceId,
+          exitCode: item.exitCode,
+          timedOut: item.timedOut,
+        })),
+      },
     });
   }
 

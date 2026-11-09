@@ -4,6 +4,7 @@ import type { ProjectContext } from "../../domain/project.ts";
 import { withImmediateTransaction } from "../../db/transaction.ts";
 import { isProjectResolutionError } from "../../mcp/context.ts";
 import type { ToolContext } from "../../mcp/types.ts";
+import { canonicalJson } from "../../shared/canonical.ts";
 import { SmileworkError } from "../../shared/errors.ts";
 import { sha256Hex } from "../../shared/hash.ts";
 import { nowIso } from "../../shared/time.ts";
@@ -43,17 +44,6 @@ export function optionalKnowledgeProject(
 
 export function knowledgeStoreOptions(smileworkHome: string): { storeRoot: string } {
   return { storeRoot: join(smileworkHome, "knowledge-store") };
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([, entry]) => entry !== undefined)
-    .sort(([left], [right]) => left.localeCompare(right));
-  return `{${entries
-    .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
-    .join(",")}}`;
 }
 
 export function knowledgeRequestHash(request: unknown): string {

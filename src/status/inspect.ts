@@ -3,6 +3,7 @@ import { existsSync, lstatSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Actor } from "../domain/actor.ts";
+import { loadSmileworkConfig, type SmileworkConfig } from "../mcp/profiles.ts";
 import { actorHint, resolveActor } from "../project/actor.ts";
 import { resolveProject } from "../project/resolve.ts";
 import { SmileworkError } from "../shared/errors.ts";
@@ -104,6 +105,8 @@ export interface InspectStatusOptions {
   cwd?: string;
   actor?: Actor;
   actorHint?: string | null;
+  /** 已解析的設定；省略時依 env 與 cwd 解析，呼叫端可與其他檢查共用同一份結果。 */
+  config?: SmileworkConfig;
 }
 
 /** 收集唯讀健康狀態；任何子系統失敗都只記 warning，不讓整份狀態失敗。 */
@@ -116,8 +119,9 @@ export function inspectStatus(options: InspectStatusOptions = {}): StatusReport 
   const hint = options.actorHint === undefined ? actorHint(actor) : options.actorHint;
   if (hint) warnings.push(hint);
 
-  const configuredProfile = env.SMILEWORK_PROFILE?.trim();
   const pathsEnv = envWithSmileworkHome(env);
+  const config = options.config ?? loadSmileworkConfig({ env: pathsEnv, cwd });
+  warnings.push(...config.warnings);
 
   return {
     version: { name: SERVER_NAME, version: SERVER_VERSION },
@@ -125,8 +129,8 @@ export function inspectStatus(options: InspectStatusOptions = {}): StatusReport 
     project: inspectProject(env, cwd, warnings),
     actor: { ...actor, hint },
     profile: {
-      name: configuredProfile || "worker",
-      configured: Boolean(configuredProfile),
+      name: config.profile,
+      configured: config.profileSource !== "default",
     },
     skills: inspectSkills(env, warnings),
     transcripts: inspectTranscripts(pathsEnv, warnings),
@@ -135,7 +139,7 @@ export function inspectStatus(options: InspectStatusOptions = {}): StatusReport 
 }
 
 /**
- * 呼叫端只給 HOME 時，資料庫與索引仍要落在那個 home 之下。
+ * 呼叫端只給 HOME 時，資料庫、索引與全域設定仍要落在那個 home 之下。
  * 共用的路徑工具只認 SMILEWORK_HOME，這裡補上明確值，避免讀到真實家目錄。
  */
 function envWithSmileworkHome(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

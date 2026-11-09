@@ -23,7 +23,7 @@
   },
   "type": "module",
   "bin": {
-    "smilework": "./src/cli/index.ts"
+    "smilework": "src/cli/index.ts"
   },
   "files": [
     "src",

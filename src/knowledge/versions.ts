@@ -19,6 +19,7 @@ import { atomicWriteFile } from "../shared/atomic-write.ts";
 import { ERROR_CODES, SmileworkError } from "../shared/errors.ts";
 import { sha256Hex } from "../shared/hash.ts";
 import { expandHome, smileworkKnowledgeStorePath } from "../shared/paths.ts";
+import { parseStoredStringArray } from "../shared/stored-json.ts";
 import { nowIso } from "../shared/time.ts";
 import { createUnifiedDiff } from "./diff.ts";
 
@@ -81,15 +82,6 @@ interface KnowledgeVersionRow {
   created_at: string;
 }
 
-function parseStringArray(value: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
 export function rowToKnowledgeEntry(row: KnowledgeEntryRow): KnowledgeEntry {
   return {
     id: row.id,
@@ -102,7 +94,11 @@ export function rowToKnowledgeEntry(row: KnowledgeEntryRow): KnowledgeEntry {
     description: row.description,
     pinned: row.pinned === 1,
     source: row.source,
-    tags: parseStringArray(row.tags),
+    tags: parseStoredStringArray(row.tags, {
+      entity: "知識項目",
+      id: row.knowledge_id,
+      field: "tags",
+    }),
     status: row.status as KnowledgeStatus,
     currentVersion: row.current_version,
     version: row.version,
@@ -124,7 +120,11 @@ function rowToKnowledgeVersion(row: KnowledgeVersionRow): KnowledgeVersion {
     actor: row.actor,
     actorModel: row.actor_model,
     reason: row.reason,
-    sourceSignalIds: parseStringArray(row.source_signal_ids),
+    sourceSignalIds: parseStoredStringArray(row.source_signal_ids, {
+      entity: "知識版本",
+      id: `${row.entry_id} 版 ${row.version}`,
+      field: "source_signal_ids",
+    }),
     workId: row.work_id,
     createdAt: row.created_at,
   };

@@ -8,7 +8,7 @@ import {
   PROFILE_TOOLS,
   profileToolNames,
 } from "../../src/mcp/profiles.ts";
-import { TOOL_NAMES } from "../../src/mcp/registry.ts";
+import { TOOL_DEFINITIONS, TOOL_NAMES } from "../../src/mcp/registry.ts";
 import { createGitRepo } from "../helpers/git.ts";
 import { withTempHome } from "../helpers/temp.ts";
 import { CURATOR_TOOL_NAMES, WORKER_TOOL_NAMES } from "./helpers.ts";
@@ -56,6 +56,15 @@ describe("工具 profile 定義", () => {
     const narrowed = profileToolNames("full", ["work_create", "not_a_tool"]);
     expect(narrowed).toHaveLength(20);
     expect(narrowed).not.toContain("work_create");
+  });
+
+  test("TOOL_DEFINITIONS 的名稱與順序和 TOOL_NAMES 完全相同，PROFILE_TOOLS 都在清單內", () => {
+    expect(TOOL_DEFINITIONS.map((tool) => tool.name)).toEqual([...TOOL_NAMES]);
+    for (const profile of ["worker", "curator", "full"] as const) {
+      for (const name of PROFILE_TOOLS[profile]) {
+        expect(TOOL_NAMES).toContain(name);
+      }
+    }
   });
 });
 
@@ -156,6 +165,55 @@ describe("兩層設定檔", () => {
       expect(config.tools).toHaveLength(12);
       expect(config.files).toEqual({ global: null, project: null });
       expect(config.warnings).toEqual([]);
+    });
+  });
+
+  test("全域 disabledTools 的未知工具名稱留下警告，合法名稱仍停用", async () => {
+    await withTempHome("mcp-surface-config-unknown-global", async (home, root) => {
+      const repo = await createGitRepo(join(root, "repo"));
+      await mkdir(home, { recursive: true });
+      await writeFile(
+        join(home, "config.jsonc"),
+        `{"disabledTools": ["work_create", "not_a_tool"]}\n`,
+        "utf8",
+      );
+
+      const config = loadSmileworkConfig({
+        env: { ...process.env, SMILEWORK_HOME: home, SMILEWORK_PROFILE: undefined },
+        projectPath: repo,
+      });
+
+      expect(config.tools).not.toContain("work_create");
+      expect(config.tools).toHaveLength(11);
+      expect(config.warnings).toHaveLength(1);
+      expect(config.warnings[0]).toContain("全域設定");
+      expect(config.warnings[0]).toContain("未知");
+      expect(config.warnings[0]).toContain("not_a_tool");
+      expect(config.warnings[0]).not.toContain("work_create");
+    });
+  });
+
+  test("專案 disabledTools 的未知工具名稱也留下警告，合法名稱仍停用", async () => {
+    await withTempHome("mcp-surface-config-unknown-project", async (home, root) => {
+      const repo = await createGitRepo(join(root, "repo"));
+      await writeFile(
+        join(repo, ".smilework.jsonc"),
+        `{"disabledTools": ["knowledge_read", "knowlege_read"]}\n`,
+        "utf8",
+      );
+
+      const config = loadSmileworkConfig({
+        env: { ...process.env, SMILEWORK_HOME: home, SMILEWORK_PROFILE: undefined },
+        projectPath: repo,
+      });
+
+      expect(config.tools).not.toContain("knowledge_read");
+      expect(config.tools).toHaveLength(11);
+      expect(config.warnings).toHaveLength(1);
+      expect(config.warnings[0]).toContain("專案設定");
+      expect(config.warnings[0]).toContain("未知");
+      expect(config.warnings[0]).toContain("knowlege_read");
+      expect(config.warnings[0]).not.toContain("knowledge_read");
     });
   });
 });

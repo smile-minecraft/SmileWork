@@ -103,23 +103,38 @@ export function insertWork(db: Database, projectId: string, options: InsertWorkO
   return workId;
 }
 
+export interface InsertEvidenceOptions {
+  evidenceId?: string;
+  serverIssued?: boolean;
+  summary?: string;
+  /** verify_run 的結束碼；不指定時模擬沒有 exitCode 的既有證據。 */
+  exitCode?: number | null;
+  /** verify_run 逾時時 details 會帶 timedOut=true，exitCode 為 null。 */
+  timedOut?: boolean;
+}
+
 export function insertEvidence(
   db: Database,
   projectId: string,
   workId: string,
-  options: { evidenceId?: string; serverIssued?: boolean; summary?: string } = {},
+  options: InsertEvidenceOptions = {},
 ): string {
   const evidenceId = options.evidenceId ?? `evidence-${randomUUID()}`;
+  const details =
+    options.timedOut === undefined ? null : JSON.stringify({ timedOut: options.timedOut });
   db.query(
     `INSERT INTO evidence (
-       evidence_id, project_id, work_id, kind, actor, summary, command, server_issued, created_at
-     ) VALUES (?, ?, ?, 'test', 'build', ?, 'bun test', ?, ?)`,
+       evidence_id, project_id, work_id, kind, actor, summary, command, server_issued,
+       exit_code, details, created_at
+     ) VALUES (?, ?, ?, 'test', 'build', ?, 'bun test', ?, ?, ?, ?)`,
   ).run(
     evidenceId,
     projectId,
     workId,
     options.summary ?? "測試證據",
     options.serverIssued ? 1 : 0,
+    options.exitCode ?? null,
+    details,
     new Date().toISOString(),
   );
   return evidenceId;

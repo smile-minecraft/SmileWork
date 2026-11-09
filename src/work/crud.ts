@@ -17,9 +17,16 @@ import { updateVersionedRow } from "../db/optimistic.ts";
 import { withImmediateTransaction } from "../db/transaction.ts";
 import { isProjectResolutionError } from "../mcp/context.ts";
 import type { ToolContext } from "../mcp/types.ts";
+import { canonicalJson } from "../shared/canonical.ts";
 import { ERROR_CODES, SmileworkError } from "../shared/errors.ts";
 import { newId, sha256Hex } from "../shared/hash.ts";
 import { ok, type ToolResult } from "../shared/result.ts";
+import {
+  parseStoredJson,
+  parseStoredStringArray,
+  parseStoredToolResult,
+  type StoredJsonRef,
+} from "../shared/stored-json.ts";
 import { nowIso } from "../shared/time.ts";
 
 /** 工作工具對外承諾的錯誤碼；其他工具的錯誤碼留在各自的模組。 */
@@ -174,26 +181,14 @@ export function requireWorkProject(context: ToolContext): ProjectContext {
   }
 }
 
-function parseStringArray(value: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-function parseObject<T>(value: string | null): T | null {
-  if (value === null) return null;
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return typeof parsed === "object" && parsed !== null ? (parsed as T) : null;
-  } catch {
-    return null;
-  }
+function parseObject<T>(value: string | null, ref: StoredJsonRef): T | null {
+  const parsed = parseStoredJson(value, ref);
+  if (typeof parsed !== "object" || parsed === null) return null;
+  return parsed as T;
 }
 
 function toWorkView(row: WorkRow, dependsOn: string[], labels: string[]): WorkView {
+  const ref = (field: string): StoredJsonRef => ({ entity: "工作", id: row.work_id, field });
   return {
     id: row.work_id,
     projectId: row.project_id,
@@ -201,10 +196,10 @@ function toWorkView(row: WorkRow, dependsOn: string[], labels: string[]): WorkVi
     parentId: row.plan_id,
     title: row.title,
     objective: row.objective,
-    nonGoals: parseStringArray(row.non_goals),
-    contextRefs: parseStringArray(row.context_refs),
-    scopePaths: parseStringArray(row.scope_paths),
-    acceptance: parseStringArray(row.acceptance),
+    nonGoals: parseStoredStringArray(row.non_goals, ref("non_goals")),
+    contextRefs: parseStoredStringArray(row.context_refs, ref("context_refs")),
+    scopePaths: parseStoredStringArray(row.scope_paths, ref("scope_paths")),
+    acceptance: parseStoredStringArray(row.acceptance, ref("acceptance")),
     status: row.status as WorkStatus,
     resolution: row.resolution as WorkResolution | null,
     risk: row.risk as RiskLevel | null,
@@ -212,8 +207,11 @@ function toWorkView(row: WorkRow, dependsOn: string[], labels: string[]): WorkVi
     labels,
     owner: row.owner,
     dependsOn,
-    review: parseObject<WorkReview>(row.review),
-    acceptanceResults: parseObject<AcceptanceResults>(row.acceptance_results),
+    review: parseObject<WorkReview>(row.review, ref("review")),
+    acceptanceResults: parseObject<AcceptanceResults>(
+      row.acceptance_results,
+      ref("acceptance_results"),
+    ),
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -236,7 +234,11 @@ function toEvidenceView(row: EvidenceRow): EvidenceView {
     exitCode: row.exit_code,
     durationMs: row.duration_ms,
     serverIssued: row.server_issued === 1,
-    details: parseObject<Record<string, unknown>>(row.details),
+    details: parseObject<Record<string, unknown>>(row.details, {
+      entity: "證據",
+      id: row.evidence_id,
+      field: "details",
+    }),
     createdAt: row.created_at,
   };
 }
@@ -275,7 +277,11 @@ function loadLabels(db: Database, workIds: readonly string[]): Map<string, strin
     .all(...keys);
   for (const row of rows) {
     if (!row.key.startsWith(LABELS_KEY_PREFIX)) continue;
-    grouped.set(row.key.slice(LABELS_KEY_PREFIX.length), parseStringArray(row.value));
+    const workId = row.key.slice(LABELS_KEY_PREFIX.length);
+    grouped.set(
+      workId,
+      parseStoredStringArray(row.value, { entity: "工作", id: workId, field: "labels" }),
+    );
   }
   return grouped;
 }
@@ -458,17 +464,6 @@ function validationError(message: string, data: Record<string, unknown> = {}): S
   );
 }
 
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([, entry]) => entry !== undefined)
-    .sort(([left], [right]) => left.localeCompare(right));
-  return `{${entries
-    .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
-    .join(",")}}`;
-}
-
 function hashRequest(input: unknown): string {
   const request = { ...(input as Record<string, unknown>) };
   delete request.idempotencyKey;
@@ -507,7 +502,10 @@ function runIdempotent(
           { key: options.key },
         );
       }
-      return JSON.parse(existing.response) as ToolResult;
+      return parseStoredToolResult(existing.response, {
+        tool: options.tool,
+        key: options.key,
+      });
     }
 
     const result = run();

@@ -1,5 +1,10 @@
 import { accessSync, constants, statSync } from "node:fs";
 import type { Command } from "../command.ts";
+import {
+  loadSmileworkConfig,
+  PROFILE_NAMES,
+  type SmileworkConfig,
+} from "../../mcp/profiles.ts";
 import { inspectStatus, type StatusReport } from "../../status/index.ts";
 import type {
   ActorStatus,
@@ -17,9 +22,6 @@ const USAGE = [
   "有警告時以 1 結束；--json 輸出完整檢查結果。",
   "",
 ].join("\n");
-
-/** profile 名稱目前固定是這三個；doctor 只做提示，不改變實際行為。 */
-const KNOWN_PROFILES = new Set(["worker", "curator", "full"]);
 
 export type DoctorCheckStatus = "ok" | "warn";
 
@@ -55,7 +57,7 @@ function isMissingPathError(error: unknown): boolean {
   return code === "ENOENT" || code === "ENOTDIR";
 }
 
-function configCheck(env: NodeJS.ProcessEnv): DoctorCheck {
+function configCheck(env: NodeJS.ProcessEnv, config: SmileworkConfig): DoctorCheck {
   const home = smileworkHome(env);
 
   let info;
@@ -86,17 +88,15 @@ function configCheck(env: NodeJS.ProcessEnv): DoctorCheck {
     );
   }
 
-  const profile = env.SMILEWORK_PROFILE?.trim();
-  const profileName = profile === undefined || profile === "" ? "worker" : profile;
-  if (!KNOWN_PROFILES.has(profileName)) {
+  if (config.warnings.length > 0) {
     return warnCheck(
       "設定",
-      `不認得的 profile：${profileName}`,
-      `把 SMILEWORK_PROFILE 設為 ${[...KNOWN_PROFILES].join("、")} 之一，或移除這個變數使用預設值。`,
+      `家目錄可寫：${home}；profile：${config.profile}。設定警告：${config.warnings.join("；")}`,
+      `檢查 SMILEWORK_PROFILE 與設定檔（config.jsonc、.smilework.jsonc）的內容；profile 只接受 ${PROFILE_NAMES.join("、")}。`,
     );
   }
 
-  return okCheck("設定", `家目錄可寫：${home}；profile：${profileName}`);
+  return okCheck("設定", `家目錄可寫：${home}；profile：${config.profile}`);
 }
 
 function databaseCheck(database: DatabaseHealth): DoctorCheck {
@@ -215,10 +215,11 @@ function transcriptsCheck(transcripts: TranscriptHealth): DoctorCheck {
 export function runDoctor(options: DoctorOptions = {}): DoctorResult {
   const env = options.env ?? process.env;
   const cwd = options.cwd ?? process.cwd();
-  const report = inspectStatus({ env, cwd });
+  const config = loadSmileworkConfig({ env, cwd });
+  const report = inspectStatus({ env, cwd, config });
 
   const checks: DoctorCheck[] = [
-    configCheck(env),
+    configCheck(env, config),
     databaseCheck(report.database),
     projectCheck(report.project),
     actorCheck(report.actor),

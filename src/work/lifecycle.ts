@@ -14,6 +14,12 @@ import type {
 } from "../domain/work.ts";
 import { newId, sha256Hex } from "../shared/hash.ts";
 import { fail, ok, type ToolResult } from "../shared/result.ts";
+import {
+  parseStoredJson,
+  parseStoredObject,
+  parseStoredStringArray,
+  parseStoredToolResult,
+} from "../shared/stored-json.ts";
 import { nowIso } from "../shared/time.ts";
 import {
   evaluateCompletionGates,
@@ -72,6 +78,8 @@ interface WorkRow {
 interface EvidenceRow {
   evidenceId: string;
   serverIssued: number;
+  exitCode: number | null;
+  details: string | null;
 }
 
 interface DependencyRow {
@@ -85,27 +93,20 @@ interface IdempotencyRow {
   response: string;
 }
 
-function parseJson(value: string | null, column: string): unknown {
-  if (value === null || value === "") return null;
-  try {
-    return JSON.parse(value);
-  } catch {
-    throw new Error(`work_items.${column} 不是合法 JSON。`);
-  }
+function parseJson(value: string | null, workId: string, column: string): unknown {
+  return parseStoredJson(value, { entity: "工作", id: workId, field: column });
 }
 
-function parseStringArray(value: string, column: string): string[] {
-  const parsed = parseJson(value, column);
-  if (parsed === null) return [];
-  if (!Array.isArray(parsed)) throw new Error(`work_items.${column} 必須是字串陣列。`);
-  for (const item of parsed) {
-    if (typeof item !== "string") throw new Error(`work_items.${column} 必須是字串陣列。`);
-  }
-  return parsed;
+function parseStringArray(value: string | null, workId: string, column: string): string[] {
+  return parseStoredStringArray(value, { entity: "工作", id: workId, field: column });
 }
 
-function parseReview(value: string | null, reviewedVersion: number | null): WorkReview | null {
-  const parsed = parseJson(value, "review");
+function parseReview(
+  value: string | null,
+  reviewedVersion: number | null,
+  workId: string,
+): WorkReview | null {
+  const parsed = parseJson(value, workId, "review");
   if (parsed === null) return null;
   if (typeof parsed !== "object" || Array.isArray(parsed)) return null;
 
@@ -125,8 +126,11 @@ function parseReview(value: string | null, reviewedVersion: number | null): Work
   return review;
 }
 
-function parseAcceptanceResults(value: string | null): AcceptanceResults | null {
-  const parsed = parseJson(value, "acceptance_results");
+function parseAcceptanceResults(
+  value: string | null,
+  workId: string,
+): AcceptanceResults | null {
+  const parsed = parseJson(value, workId, "acceptance_results");
   if (parsed === null) return null;
   if (typeof parsed !== "object" || Array.isArray(parsed)) return null;
 
@@ -163,13 +167,13 @@ function mapWorkRow(row: WorkRow): WorkItem {
     priority: row.priority,
     planId: row.plan_id,
     objective: row.objective,
-    nonGoals: parseStringArray(row.non_goals, "non_goals"),
-    contextRefs: parseStringArray(row.context_refs, "context_refs"),
-    scopePaths: parseStringArray(row.scope_paths, "scope_paths"),
-    acceptance: parseStringArray(row.acceptance, "acceptance"),
+    nonGoals: parseStringArray(row.non_goals, row.work_id, "non_goals"),
+    contextRefs: parseStringArray(row.context_refs, row.work_id, "context_refs"),
+    scopePaths: parseStringArray(row.scope_paths, row.work_id, "scope_paths"),
+    acceptance: parseStringArray(row.acceptance, row.work_id, "acceptance"),
     risk: row.risk as RiskLevel | null,
-    review: parseReview(row.review, row.reviewed_version),
-    acceptanceResults: parseAcceptanceResults(row.acceptance_results),
+    review: parseReview(row.review, row.reviewed_version, row.work_id),
+    acceptanceResults: parseAcceptanceResults(row.acceptance_results, row.work_id),
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -187,13 +191,24 @@ function loadWork(db: Database, projectId: string, workId: string): WorkItem | n
   return row ? mapWorkRow(row) : null;
 }
 
+function parseEvidenceTimedOut(details: string | null, evidenceId: string): boolean {
+  const parsed = parseStoredObject(details, { entity: "證據", id: evidenceId, field: "details" });
+  return parsed?.timedOut === true;
+}
+
 function loadEvidence(db: Database, projectId: string, workId: string): EvidenceReference[] {
   return db
     .query<EvidenceRow, [string, string]>(
-      "SELECT evidence_id AS evidenceId, server_issued AS serverIssued FROM evidence WHERE project_id = ? AND work_id = ?",
+      `SELECT evidence_id AS evidenceId, server_issued AS serverIssued, exit_code AS exitCode, details
+       FROM evidence WHERE project_id = ? AND work_id = ?`,
     )
     .all(projectId, workId)
-    .map((row) => ({ evidenceId: row.evidenceId, serverIssued: row.serverIssued === 1 }));
+    .map((row) => ({
+      evidenceId: row.evidenceId,
+      serverIssued: row.serverIssued === 1,
+      exitCode: row.exitCode,
+      timedOut: parseEvidenceTimedOut(row.details, row.evidenceId),
+    }));
 }
 
 function loadDependencies(db: Database, workId: string): DependencyReference[] {
@@ -300,19 +315,11 @@ function readIdempotency(
     );
   }
 
-  return parseStoredResult(row.response);
+  return parseStoredResult(row.response, key);
 }
 
-function parseStoredResult(value: string): ToolResult {
-  const parsed: unknown = JSON.parse(value);
-  if (
-    parsed === null ||
-    typeof parsed !== "object" ||
-    typeof (parsed as { ok?: unknown }).ok !== "boolean"
-  ) {
-    throw new Error("idempotency_keys.response 不是合法的工具結果。");
-  }
-  return parsed as ToolResult;
+function parseStoredResult(value: string, key: string): ToolResult {
+  return parseStoredToolResult(value, { tool: COMPLETE_TOOL, key });
 }
 
 function writeIdempotency(

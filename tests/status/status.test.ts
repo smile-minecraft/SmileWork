@@ -172,6 +172,44 @@ describe("健康狀態", () => {
     });
   });
 
+  test("全域設定檔的 profile 被採用，並標示 configured", async () => {
+    await withStatusHome("status-profile-global", async ({ env, home, root }) => {
+      writeFileSync(join(home, "config.jsonc"), `{"profile": "full"}\n`, "utf8");
+
+      const report = inspectStatus({ env, cwd: root });
+
+      expect(report.profile).toEqual({ name: "full", configured: true });
+    });
+  });
+
+  test("SMILEWORK_PROFILE 優先於全域設定檔的 profile", async () => {
+    await withStatusHome("status-profile-precedence", async ({ env, home, root }) => {
+      writeFileSync(join(home, "config.jsonc"), `{"profile": "full"}\n`, "utf8");
+
+      const report = inspectStatus({
+        env: { ...env, SMILEWORK_PROFILE: "curator" },
+        cwd: root,
+      });
+
+      expect(report.profile).toEqual({ name: "curator", configured: true });
+    });
+  });
+
+  test("全域設定檔的 profile 無效時使用預設值並留下 warning", async () => {
+    await withStatusHome("status-profile-invalid", async ({ env, home, root }) => {
+      writeFileSync(join(home, "config.jsonc"), `{"profile": "bogus"}\n`, "utf8");
+
+      const report = inspectStatus({ env, cwd: root });
+
+      expect(report.profile).toEqual({ name: "worker", configured: false });
+      expect(
+        report.warnings.some(
+          (warning) => warning.includes("profile") && warning.includes("bogus"),
+        ),
+      ).toBe(true);
+    });
+  });
+
   test("技能來源與連結目錄都不存在時標示未啟用", async () => {
     await withStatusHome("status-skills-none", async ({ env, root }) => {
       const report = inspectStatus({ env, cwd: root });

@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import type { Database } from "bun:sqlite";
 import { tool as completeTool } from "../../../src/tools/work/complete.ts";
 import type { ToolContext } from "../../../src/mcp/types.ts";
-import type { ToolResult } from "../../../src/shared/result.ts";
+import { failureFromError, type ToolResult } from "../../../src/shared/result.ts";
 import {
   callComplete,
   callReview,
@@ -265,6 +266,168 @@ describe("work_complete 的結案條件", () => {
     });
   });
 
+  test("高風險工作只有失敗的伺服器證據時拒絕結案，補上成功的證據後可以通過", async () => {
+    await withLifecycle(async ({ db, projectId, context }) => {
+      const workId = insertWork(db, projectId, { risk: "high", acceptance: ["a"] });
+      const review = await callReviewOnce(context, workId);
+      expect(review.ok).toBe(true);
+
+      const failed = insertEvidence(db, projectId, workId, { serverIssued: true, exitCode: 1 });
+      const blocked = await callComplete(context, {
+        id: workId,
+        expectedVersion: 2,
+        acceptance: [{ criterion: "a", met: true, evidenceIds: [failed] }],
+      });
+
+      expect(blocked.ok).toBe(false);
+      if (blocked.ok) return;
+      expect(blocked.code).toBe("SERVER_EVIDENCE_FAILED");
+      expect(blocked.data.blockedBy).toContain("SERVER_EVIDENCE_FAILED");
+      const afterBlocked = readWork(db, workId);
+      expect(afterBlocked?.status).toBe("review");
+      expect(afterBlocked?.version).toBe(2);
+
+      const passed = insertEvidence(db, projectId, workId, { serverIssued: true, exitCode: 0 });
+      const completed = await callComplete(context, {
+        id: workId,
+        expectedVersion: 2,
+        acceptance: [{ criterion: "a", met: true, evidenceIds: [passed] }],
+      });
+
+      expect(completed.ok).toBe(true);
+      if (!completed.ok) return;
+      expect(completed.data).toMatchObject({ status: "done", resolution: "completed" });
+    });
+  });
+
+  test("逾時的伺服器證據不能單獨讓高風險工作通關", async () => {
+    await withLifecycle(async ({ db, projectId, context }) => {
+      const workId = insertWork(db, projectId, { risk: "high", acceptance: [] });
+      const review = await callReviewOnce(context, workId);
+      expect(review.ok).toBe(true);
+
+      insertEvidence(db, projectId, workId, { serverIssued: true, timedOut: true });
+      const blocked = await callComplete(context, {
+        id: workId,
+        expectedVersion: 2,
+        acceptance: [],
+      });
+
+      expect(blocked.ok).toBe(false);
+      if (blocked.ok) return;
+      expect(blocked.code).toBe("SERVER_EVIDENCE_FAILED");
+      expect(readWork(db, workId)?.status).toBe("review");
+    });
+  });
+
+  test("details 損壞的伺服器證據不能讓高風險工作結案，工作維持 review", async () => {
+    await withLifecycle(async ({ db, projectId, context }) => {
+      const workId = insertWork(db, projectId, { risk: "high", acceptance: [] });
+      const review = await callReviewOnce(context, workId);
+      expect(review.ok).toBe(true);
+
+      const evidenceId = insertEvidence(db, projectId, workId, { serverIssued: true });
+      setEvidenceDetails(db, evidenceId, "not-json");
+
+      const blocked = await callCompleteEnvelope(context, {
+        id: workId,
+        expectedVersion: 2,
+        acceptance: [],
+      });
+
+      expect(blocked.ok).toBe(false);
+      if (blocked.ok) return;
+      expect(blocked.code).toBe("INTERNAL_ERROR");
+      expect(blocked.message).toContain(evidenceId);
+      expect(blocked.message).toContain("details");
+      expect(blocked.data).toMatchObject({ field: "details" });
+
+      const after = readWork(db, workId);
+      expect(after?.status).toBe("review");
+      expect(after?.version).toBe(2);
+    });
+  });
+
+  test("details 是合法 JSON 但不是物件時也不能讓高風險工作結案", async () => {
+    await withLifecycle(async ({ db, projectId, context }) => {
+      const workId = insertWork(db, projectId, { risk: "high", acceptance: [] });
+      const review = await callReviewOnce(context, workId);
+      expect(review.ok).toBe(true);
+
+      const evidenceId = insertEvidence(db, projectId, workId, { serverIssued: true });
+      setEvidenceDetails(db, evidenceId, '["timedOut"]');
+
+      const blocked = await callCompleteEnvelope(context, {
+        id: workId,
+        expectedVersion: 2,
+        acceptance: [],
+      });
+
+      expect(blocked.ok).toBe(false);
+      if (blocked.ok) return;
+      expect(blocked.code).toBe("INTERNAL_ERROR");
+      expect(readWork(db, workId)?.status).toBe("review");
+    });
+  });
+
+  test("details 為合法物件且未逾時的伺服器證據仍可支撐高風險結案", async () => {
+    await withLifecycle(async ({ db, projectId, context }) => {
+      const workId = insertWork(db, projectId, { risk: "high", acceptance: ["a"] });
+      const review = await callReviewOnce(context, workId);
+      expect(review.ok).toBe(true);
+
+      const evidenceId = insertEvidence(db, projectId, workId, {
+        serverIssued: true,
+        exitCode: 0,
+        timedOut: false,
+      });
+      const completed = await callComplete(context, {
+        id: workId,
+        expectedVersion: 2,
+        acceptance: [{ criterion: "a", met: true, evidenceIds: [evidenceId] }],
+      });
+
+      expect(completed.ok).toBe(true);
+      if (!completed.ok) return;
+      expect(completed.data).toMatchObject({ status: "done", resolution: "completed" });
+    });
+  });
+
+  test("沒有 exitCode 的既有伺服器證據仍可支撐高風險結案", async () => {
+    await withLifecycle(async ({ db, projectId, context }) => {
+      const workId = insertWork(db, projectId, { risk: "high", acceptance: ["a"] });
+      const review = await callReviewOnce(context, workId);
+      expect(review.ok).toBe(true);
+
+      const legacyEvidence = insertEvidence(db, projectId, workId, { serverIssued: true });
+      const completed = await callComplete(context, {
+        id: workId,
+        expectedVersion: 2,
+        acceptance: [{ criterion: "a", met: true, evidenceIds: [legacyEvidence] }],
+      });
+
+      expect(completed.ok).toBe(true);
+      if (!completed.ok) return;
+      expect(completed.data).toMatchObject({ status: "done", resolution: "completed" });
+    });
+  });
+
+  test("低風險工作不會因為伺服器證據失敗而被擋下", async () => {
+    await withLifecycle(async ({ db, projectId, context }) => {
+      const workId = insertWork(db, projectId, { risk: "low", acceptance: ["a"] });
+      const failed = insertEvidence(db, projectId, workId, { serverIssued: true, exitCode: 1 });
+      const completed = await callComplete(context, {
+        id: workId,
+        expectedVersion: 1,
+        acceptance: [{ criterion: "a", met: true, evidenceIds: [failed] }],
+      });
+
+      expect(completed.ok).toBe(true);
+      if (!completed.ok) return;
+      expect(completed.data).toMatchObject({ status: "done", resolution: "completed" });
+    });
+  });
+
   test("依賴未完成時拒絕結案，依賴取消時提供可操作的下一步", async () => {
     await withLifecycle(async ({ db, projectId, context }) => {
       const workId = insertWork(db, projectId, { acceptance: [] });
@@ -427,4 +590,21 @@ async function callReviewOnce(context: ToolContext, workId: string): Promise<Too
     reviewer: "momus",
     note: "獨立看過",
   });
+}
+
+/** 直接改資料庫，把證據的 details 換成指定字串，模擬損壞或舊格式的內容。 */
+function setEvidenceDetails(db: Database, evidenceId: string, details: string): void {
+  db.query("UPDATE evidence SET details = ? WHERE evidence_id = ?").run(details, evidenceId);
+}
+
+/** 直接呼叫 handler 時把例外轉成 MCP 回給宿主的失敗外框，處理方式和 runTool 相同。 */
+async function callCompleteEnvelope(
+  context: ToolContext,
+  input: Record<string, unknown>,
+): Promise<ToolResult> {
+  try {
+    return await callComplete(context, input);
+  } catch (error) {
+    return failureFromError(error);
+  }
 }

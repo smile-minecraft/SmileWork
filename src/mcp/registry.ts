@@ -21,8 +21,12 @@ import { tool as knowledgeRevert } from "../tools/knowledge/revert.ts";
 import { tool as transcriptSearch } from "../tools/transcript/search.ts";
 import { tool as transcriptRead } from "../tools/transcript/read.ts";
 import { runTool } from "./result.ts";
+import { TOOL_NAMES } from "./tool-names.ts";
 import type { ToolDefinition, ToolDomain } from "./types.ts";
 import { passThroughInputSchema } from "./validation.ts";
+
+/** 工具名稱清單的單一來源在 tool-names.ts；registry 對外轉出，並驗證與定義一致。 */
+export { TOOL_NAMES };
 
 /** 六個領域是工具掛載點的固定分組。 */
 export const TOOLS_BY_DOMAIN: Readonly<Record<ToolDomain, readonly ToolDefinition[]>> = {
@@ -44,7 +48,19 @@ export const TOOLS_BY_DOMAIN: Readonly<Record<ToolDomain, readonly ToolDefinitio
 
 export const TOOL_DEFINITIONS: readonly ToolDefinition[] = Object.values(TOOLS_BY_DOMAIN).flat();
 
-export const TOOL_NAMES: readonly string[] = TOOL_DEFINITIONS.map((tool) => tool.name);
+/**
+ * tool-names.ts 是工具名稱的單一來源；定義與清單的名稱和順序必須完全一致，
+ * 漂移時在模組初始化就丟出錯誤，而不是等到掛載工具或測試才發現。
+ */
+const DEFINITION_TOOL_NAMES = TOOL_DEFINITIONS.map((tool) => tool.name);
+if (
+  DEFINITION_TOOL_NAMES.length !== TOOL_NAMES.length ||
+  DEFINITION_TOOL_NAMES.some((name, index) => name !== TOOL_NAMES[index])
+) {
+  throw new Error(
+    `registry 工具定義與 TOOL_NAMES 不一致：定義為 ${DEFINITION_TOOL_NAMES.join("、")}，清單為 ${TOOL_NAMES.join("、")}。`,
+  );
+}
 
 const TOOLS_BY_NAME = new Map(TOOL_DEFINITIONS.map((tool) => [tool.name, tool]));
 

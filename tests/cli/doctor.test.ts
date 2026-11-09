@@ -21,6 +21,7 @@ interface DoctorPayload {
     database: { status: string };
     project: { status: string };
     actor: { declared: boolean };
+    profile: { name: string; configured: boolean };
     skills: { status: string };
     transcripts: { status: string };
   };
@@ -166,6 +167,95 @@ describe("doctor 子命令", () => {
       const payload = parseJson<DoctorPayload>(result.stdout);
       expect(findCheck(payload, "設定")).toMatchObject({ status: "warn" });
       expect(result.stderr).not.toContain("Error");
+    });
+  }, 30_000);
+
+  test("全域設定檔的 profile=full 顯示在設定檢查", async () => {
+    await withCliEnvironment("cli-doctor-profile-global", async (context) => {
+      const repo = await createGitRepo(join(context.root, "repo"));
+      healthyDatabase(context.home);
+      createTranscriptIndex(context.home);
+      await createUserSkill(context.userHome, "alpha");
+      writeFileSync(join(context.home, "config.jsonc"), `{"profile": "full"}\n`, "utf8");
+      const env = {
+        ...context.env,
+        SMILEWORK_ACTOR: "build",
+        SMILEWORK_MODEL: "test-model",
+      };
+
+      const result = await runCli(["doctor", "--json"], env, repo);
+
+      expect(result.exitCode).toBe(0);
+      const payload = parseJson<DoctorPayload>(result.stdout);
+      expect(payload.report.profile).toEqual({ name: "full", configured: true });
+      const configCheck = findCheck(payload, "設定");
+      expect(configCheck).toMatchObject({ status: "ok" });
+      expect(configCheck?.detail).toContain("profile：full");
+      expect(configCheck?.detail).not.toContain("worker");
+      expect(configCheck?.detail).not.toContain("不認得的");
+    });
+  }, 30_000);
+
+  test("SMILEWORK_PROFILE 優先於全域設定檔的 profile", async () => {
+    await withCliEnvironment("cli-doctor-profile-precedence", async (context) => {
+      const repo = await createGitRepo(join(context.root, "repo"));
+      healthyDatabase(context.home);
+      createTranscriptIndex(context.home);
+      await createUserSkill(context.userHome, "alpha");
+      writeFileSync(join(context.home, "config.jsonc"), `{"profile": "full"}\n`, "utf8");
+      const env = {
+        ...context.env,
+        SMILEWORK_PROFILE: "curator",
+        SMILEWORK_ACTOR: "build",
+        SMILEWORK_MODEL: "test-model",
+      };
+
+      const result = await runCli(["doctor", "--json"], env, repo);
+
+      expect(result.exitCode).toBe(0);
+      const payload = parseJson<DoctorPayload>(result.stdout);
+      expect(payload.report.profile).toEqual({ name: "curator", configured: true });
+      expect(findCheck(payload, "設定")?.detail).toContain("profile：curator");
+    });
+  }, 30_000);
+
+  test("沒有 SMILEWORK_PROFILE 與設定檔時，設定檢查顯示預設 worker", async () => {
+    await withCliEnvironment("cli-doctor-profile-default", async (context) => {
+      const repo = await createGitRepo(join(context.root, "repo"));
+      healthyDatabase(context.home);
+      createTranscriptIndex(context.home);
+      await createUserSkill(context.userHome, "alpha");
+      const env = {
+        ...context.env,
+        SMILEWORK_ACTOR: "build",
+        SMILEWORK_MODEL: "test-model",
+      };
+
+      const result = await runCli(["doctor", "--json"], env, repo);
+
+      expect(result.exitCode).toBe(0);
+      const payload = parseJson<DoctorPayload>(result.stdout);
+      expect(payload.report.profile).toEqual({ name: "worker", configured: false });
+      expect(findCheck(payload, "設定")?.detail).toContain("profile：worker");
+    });
+  }, 30_000);
+
+  test("不認得的 SMILEWORK_PROFILE 仍回警告與設定提示", async () => {
+    await withCliEnvironment("cli-doctor-profile-invalid", async (context) => {
+      const repo = await createGitRepo(join(context.root, "repo"));
+      const env = {
+        ...context.env,
+        SMILEWORK_PROFILE: "bogus",
+      };
+
+      const result = await runCli(["doctor", "--json"], env, repo);
+
+      expect(result.exitCode).toBe(1);
+      const payload = parseJson<DoctorPayload>(result.stdout);
+      const configCheck = findCheck(payload, "設定");
+      expect(configCheck).toMatchObject({ status: "warn" });
+      expect(configCheck?.detail).toContain("bogus");
+      expect(configCheck?.nextAction).toContain("SMILEWORK_PROFILE");
     });
   }, 30_000);
 });
