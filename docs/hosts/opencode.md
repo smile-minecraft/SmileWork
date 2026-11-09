@@ -29,7 +29,7 @@ OpenCode 從專案的 `opencode.json` 或 `opencode.jsonc` 讀取設定，也可
 }
 ```
 
-`command` 的第一個元素要填 `bun` 的絕對路徑。OpenCode 會把 `environment` 疊在目前程序環境之上；這裡設定的值優先。`SMILEWORK_PROJECT` 指向要操作工作的 git 專案；如果 OpenCode 一定從專案根目錄啟動，可以省略。
+`command` 的第一個元素要填 `bun` 的絕對路徑。OpenCode 會把 `environment` 疊在目前程序環境之上；這裡設定的值優先。`SMILEWORK_PROJECT` 指向要操作工作的專案資料夾；如果 OpenCode 一定從專案根目錄啟動，可以省略。
 
 存檔後開新工作階段，或用 `opencode mcp list` 確認 `smilework` 的狀態。工具會出現在 `smilework` 這個伺服器名稱底下。
 

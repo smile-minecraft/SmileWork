@@ -8,6 +8,7 @@
 - [Claude Code](hosts/claude-code.md)
 - [OpenCode](hosts/opencode.md)
 - [Codex](hosts/codex.md)
+- [Pi](hosts/pi.md)
 - [整理代理](hosts/curator.md)
 
 ## 公開規格
