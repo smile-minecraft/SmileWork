@@ -119,6 +119,15 @@ function verifyAppliedMigrations(
       );
     }
 
+    if (row.name !== file.name) {
+      throw new SmileworkError(
+        "MIGRATION_RENAMED",
+        `資料庫記錄的 migration ${row.version} 檔名是 ${row.name}，目前是 ${file.name}。`,
+        "把檔名改回去，或新增一個新的 migration；不要重新命名已套用的檔案。",
+        { version: row.version, recorded: row.name, actual: file.name },
+      );
+    }
+
     const actual = migrationHash(file.path);
     if (row.sha256 === null) {
       pendingBackfill.set(row.version, actual);
@@ -130,14 +139,6 @@ function verifyAppliedMigrations(
         `migration ${row.version}（${file.name}）的內容在套用後被修改：資料庫記錄 ${row.sha256}，目前檔案 ${actual}。`,
         "還原這個 migration 檔，或新增一個新的 migration 來修正 schema；不要直接修改已套用的檔案。",
         { version: row.version, name: file.name, recorded: row.sha256, actual },
-      );
-    }
-    if (row.name !== file.name) {
-      throw new SmileworkError(
-        "MIGRATION_RENAMED",
-        `資料庫記錄的 migration ${row.version} 檔名是 ${row.name}，目前是 ${file.name}。`,
-        "把檔名改回去，或新增一個新的 migration；不要重新命名已套用的檔案。",
-        { version: row.version, recorded: row.name, actual: file.name },
       );
     }
   }

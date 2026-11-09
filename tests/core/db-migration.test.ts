@@ -234,6 +234,39 @@ describe("資料庫與 migration", () => {
     });
   });
 
+  test("舊資料列沒有雜湊但檔名不符時，第一次啟動就報 MIGRATION_RENAMED", async () => {
+    await withTempDir("migrate-hash-legacy-renamed", async (dir) => {
+      const migrations = join(dir, "migrations");
+      mkdirSync(migrations);
+      writeFileSync(
+        join(migrations, "0001_renamed.sql"),
+        "CREATE TABLE sample (id INTEGER PRIMARY KEY) STRICT;\n",
+        "utf8",
+      );
+      const dbPath = join(dir, "db.sqlite");
+
+      const db = new Database(dbPath);
+      try {
+        db.exec(`
+          CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+          ) STRICT;
+          CREATE TABLE sample (id INTEGER PRIMARY KEY) STRICT;
+          INSERT INTO schema_migrations (version, name, applied_at)
+          VALUES (1, '0001_original.sql', '2026-01-01T00:00:00.000Z');
+        `);
+
+        expect(() => migrate(db, migrations)).toThrow(
+          expect.objectContaining({ code: "MIGRATION_RENAMED" }),
+        );
+      } finally {
+        db.close();
+      }
+    });
+  });
+
   test("雜湊不符時不會套用後面的新 migration", async () => {
     await withTempDir("migrate-hash-stops", async (dir) => {
       const migrations = join(dir, "migrations");
