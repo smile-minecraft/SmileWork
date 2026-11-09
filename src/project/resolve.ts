@@ -3,8 +3,10 @@ import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import type { ProjectContext } from "../domain/project.ts";
 import { ERROR_CODES, SmileworkError } from "../shared/errors.ts";
-import { projectIdFromCommonDir } from "../shared/hash.ts";
+import { projectIdFromCommonDir, projectIdFromPath } from "../shared/hash.ts";
+import { canonicalizePath } from "../shared/paths.ts";
 import { gitLocationFor } from "./git.ts";
+import { findLegacyProjectIdentity } from "./legacy.ts";
 
 export interface ResolveProjectOptions {
   /** 工具參數提供的專案路徑或 repo 內路徑。 */
@@ -49,7 +51,7 @@ function ensureDirectory(path: string, source: ProjectSource): void {
     throw new SmileworkError(
       ERROR_CODES.projectNotFound,
       `找不到專案目錄：${path}`,
-      `確認 ${sourceLabel(source.kind)} 指向存在的 git repo，或改用 SMILEWORK_PROJECT 指定。`,
+      `確認 ${sourceLabel(source.kind)} 指向存在的資料夾，或改用 SMILEWORK_PROJECT 指定。`,
       { path, source: source.kind },
     );
   }
@@ -57,8 +59,10 @@ function ensureDirectory(path: string, source: ProjectSource): void {
 
 /**
  * 專案解析順序：工具參數、SMILEWORK_PROJECT、程序 cwd。
- * 解析成功後一律回傳 git common dir 正規化後的 projectId；
- * 同一個 repo 的不同 worktree 會得到相同 projectId。
+ * 先找 git 根目錄；不是 git repo 時，依序改用：
+ * 1. 上層 `.ultrawork/tasks.json` 記錄的舊 projectId，接回匯入的專案。
+ * 2. 正規化絕對路徑雜湊出的專案身分。
+ * 同一條路徑不管從哪個子資料夾或尾斜線進來，都會得到相同 projectId。
  */
 export function resolveProject(options: ResolveProjectOptions = {}): ProjectContext {
   const env = options.env ?? process.env;
@@ -68,28 +72,31 @@ export function resolveProject(options: ResolveProjectOptions = {}): ProjectCont
   ensureDirectory(path, source);
 
   const location = gitLocationFor(path);
-  if (!location) {
-    if (source.kind === "cwd") {
-      throw new SmileworkError(
-        ERROR_CODES.projectRequired,
-        `目前目錄不是 git repo，無法判斷專案：${path}`,
-        "設定 SMILEWORK_PROJECT 指向 repo，或在工具參數提供專案路徑。",
-        { path, source: source.kind },
-      );
-    }
-    throw new SmileworkError(
-      ERROR_CODES.notGitRepository,
-      `專案不是 git repo：${path}`,
-      "在 git repo 內執行，或把 SMILEWORK_PROJECT 指向 repo 或 worktree。",
-      { path, source: source.kind },
-    );
+  if (location) {
+    return {
+      projectId: projectIdFromCommonDir(location.commonDir),
+      worktreePath: location.rootPath,
+      commonDir: location.commonDir,
+      rootPath: location.mainWorktreePath,
+    };
+  }
+
+  const canonical = canonicalizePath(path);
+  const legacy = findLegacyProjectIdentity(canonical, env);
+  if (legacy) {
+    return {
+      projectId: legacy.projectId,
+      worktreePath: canonical,
+      commonDir: `import:${legacy.projectId}`,
+      rootPath: legacy.rootPath,
+    };
   }
 
   return {
-    projectId: projectIdFromCommonDir(location.commonDir),
-    worktreePath: location.rootPath,
-    commonDir: location.commonDir,
-    rootPath: location.mainWorktreePath,
+    projectId: projectIdFromPath(canonical),
+    worktreePath: canonical,
+    commonDir: `path:${canonical}`,
+    rootPath: canonical,
   };
 }
 

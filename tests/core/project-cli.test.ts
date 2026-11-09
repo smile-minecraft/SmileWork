@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { realpathSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openDatabase } from "../../src/db/index.ts";
+import {
+  getProject,
+  registerProject,
+  relinkProject,
+  resolveProject,
+} from "../../src/project/index.ts";
 import { createGitRepo, createGitWorktree, moveDirectory } from "../helpers/git.ts";
 import { withTempDir } from "../helpers/temp.ts";
 
@@ -236,6 +242,42 @@ describe("project CLI", () => {
         ]);
       } finally {
         checkDb.close();
+      }
+    });
+  }, 30_000);
+
+  test("非 git 舊專案搬移後 relink 會更新 worktree 路徑，不留下舊路徑", async () => {
+    await withTempDir("project-relink-legacy", async (root) => {
+      const home = join(root, "home", ".smilework");
+      const oldPath = join(root, "legacy-a");
+      mkdirSync(join(oldPath, ".ultrawork"), { recursive: true });
+      writeFileSync(
+        join(oldPath, ".ultrawork", "tasks.json"),
+        JSON.stringify({ projectId: "legacy-move" }),
+        "utf8",
+      );
+
+      const db = openDatabase({ home });
+      try {
+        const first = resolveProject({ explicitPath: oldPath, env: {}, cwd: root });
+        registerProject(db, first);
+        expect(first.projectId).toBe("legacy-move");
+
+        await moveDirectory(oldPath, join(root, "legacy-b"));
+        const relinked = relinkProject(db, {
+          newPath: join(root, "legacy-b"),
+          projectId: "legacy-move",
+        });
+        expect(relinked.projectId).toBe("legacy-move");
+
+        const record = getProject(db, "legacy-move");
+        expect(record?.rootPath).toBe(realpathSync(join(root, "legacy-b")));
+        const worktrees = record?.worktrees.map((worktree) => worktree.worktreePath) ?? [];
+        expect(worktrees).toContain(realpathSync(join(root, "legacy-b")));
+        expect(worktrees).not.toContain(realpathSync(root) + "/legacy-a");
+        expect(worktrees.some((path) => path.endsWith("/legacy-a"))).toBe(false);
+      } finally {
+        db.close();
       }
     });
   }, 30_000);

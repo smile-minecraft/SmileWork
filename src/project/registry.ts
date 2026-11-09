@@ -76,16 +76,68 @@ export function listProjects(db: Database): ProjectRecord[] {
   return rows.map((row) => toRecord(row, grouped.get(row.project_id) ?? []));
 }
 
-/** 登記或更新專案與 worktree；重複呼叫的結果相同。 */
+function isImportedPlaceholder(record: ProjectRow): boolean {
+  return record.common_dir.startsWith("import:") && record.root_path.startsWith("import:");
+}
+
+/**
+ * 登記或更新專案與 worktree；重複呼叫的結果相同。
+ * 同一個 projectId 或 worktree 路徑已經屬於別的專案時要拒絕，
+ * 不能讓新的解析結果默默接管既有資料。
+ */
 export function registerProject(db: Database, context: ProjectContext): ProjectRecord {
   const now = nowIso();
   try {
     withImmediateTransaction(db, () => {
+      const existing = db
+        .query<ProjectRow, [string]>("SELECT * FROM projects WHERE project_id = ?")
+        .get(context.projectId);
+      if (
+        existing !== null &&
+        existing.common_dir !== context.commonDir &&
+        !isImportedPlaceholder(existing)
+      ) {
+        throw new SmileworkError(
+          ERROR_CODES.projectIdConflict,
+          `專案識別碼 ${context.projectId} 已經登記到不同位置：${existing.root_path}`,
+          "確認路徑是否正確；如果是專案搬移，改用 smilework project relink。",
+          {
+            projectId: context.projectId,
+            existingCommonDir: existing.common_dir,
+            existingRootPath: existing.root_path,
+            requestedCommonDir: context.commonDir,
+          },
+        );
+      }
+
+      const existingWorktree = db
+        .query<{ project_id: string }, [string]>(
+          "SELECT project_id FROM project_worktrees WHERE worktree_path = ?",
+        )
+        .get(context.worktreePath);
+      if (existingWorktree !== null && existingWorktree.project_id !== context.projectId) {
+        throw new SmileworkError(
+          ERROR_CODES.projectIdConflict,
+          `路徑已經登記到另一個專案：${context.worktreePath}`,
+          "確認路徑是否正確；如果是專案搬移，改用 smilework project relink。",
+          {
+            worktreePath: context.worktreePath,
+            existingProjectId: existingWorktree.project_id,
+            requestedProjectId: context.projectId,
+          },
+        );
+      }
+
       db.query(
         `INSERT INTO projects (project_id, common_dir, root_path, created_at, updated_at, last_seen_at)
          VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(project_id) DO UPDATE SET
            common_dir = excluded.common_dir,
+           root_path = CASE
+             WHEN projects.root_path LIKE 'import:%' AND excluded.root_path NOT LIKE 'import:%'
+             THEN excluded.root_path
+             ELSE projects.root_path
+           END,
            updated_at = excluded.updated_at,
            last_seen_at = excluded.last_seen_at`,
       ).run(
@@ -172,12 +224,17 @@ function determineOldWorktreePath(
   fromPath: string | undefined,
 ): string {
   if (fromPath) return canonicalizePath(fromPath);
-  if (next.projectId !== previous.projectId) return previous.rootPath;
+  if (next.projectId !== previous.projectId) {
+    // 匯入專案的 root_path 是 import:<id> 佔位字串，真正的舊路徑在 worktrees。
+    if (!previous.rootPath.startsWith("import:")) return previous.rootPath;
+    const missing = previous.worktrees.filter((worktree) => !existsSync(worktree.worktreePath));
+    if (missing.length === 1) return missing[0]!.worktreePath;
+    if (previous.worktrees.length === 1) return previous.worktrees[0]!.worktreePath;
+    return previous.rootPath;
+  }
   if (next.worktreePath === previous.rootPath) return previous.rootPath;
 
-  const missing = previous.worktrees.filter(
-    (worktree) => worktree.worktreePath !== previous.rootPath && !existsSync(worktree.worktreePath),
-  );
+  const missing = previous.worktrees.filter((worktree) => !existsSync(worktree.worktreePath));
   if (missing.length === 1) return missing[0]!.worktreePath;
 
   throw new SmileworkError(

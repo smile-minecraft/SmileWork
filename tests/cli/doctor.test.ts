@@ -88,8 +88,31 @@ describe("doctor 子命令", () => {
     });
   }, 30_000);
 
-  test("專案無法解析時回警告與非零結束碼", async () => {
+  test("專案路徑不存在時回警告與非零結束碼", async () => {
     await withCliEnvironment("cli-doctor-project", async (context) => {
+      const plain = join(context.root, "plain");
+      await mkdir(plain, { recursive: true });
+      healthyDatabase(context.home);
+      createTranscriptIndex(context.home);
+      await createUserSkill(context.userHome, "alpha");
+      const env = {
+        ...context.env,
+        SMILEWORK_ACTOR: "build",
+        SMILEWORK_MODEL: "test-model",
+        SMILEWORK_PROJECT: join(context.root, "missing-project"),
+      };
+
+      const result = await runCli(["doctor", "--json"], env, plain);
+
+      expect(result.exitCode).toBe(1);
+      const payload = parseJson<DoctorPayload>(result.stdout);
+      expect(findCheck(payload, "專案")).toMatchObject({ status: "warn" });
+      expect(findCheck(payload, "專案")?.nextAction).toContain("SMILEWORK_PROJECT");
+    });
+  }, 30_000);
+
+  test("非 git 目錄以路徑專案通過專案檢查", async () => {
+    await withCliEnvironment("cli-doctor-path-project", async (context) => {
       const plain = join(context.root, "plain");
       await mkdir(plain, { recursive: true });
       healthyDatabase(context.home);
@@ -103,10 +126,10 @@ describe("doctor 子命令", () => {
 
       const result = await runCli(["doctor", "--json"], env, plain);
 
-      expect(result.exitCode).toBe(1);
       const payload = parseJson<DoctorPayload>(result.stdout);
-      expect(findCheck(payload, "專案")).toMatchObject({ status: "warn" });
-      expect(findCheck(payload, "專案")?.nextAction).toContain("SMILEWORK_PROJECT");
+      const projectCheck = findCheck(payload, "專案");
+      expect(projectCheck).toMatchObject({ status: "ok" });
+      expect(projectCheck?.detail).toContain("路徑專案");
     });
   }, 30_000);
 

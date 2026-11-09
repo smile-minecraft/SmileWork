@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runTool } from "../../../src/mcp/result.ts";
 import { toolByName } from "../../../src/mcp/registry.ts";
@@ -10,9 +11,9 @@ function parse(result: Awaited<ReturnType<typeof runTool>>): Record<string, any>
   return JSON.parse(block.text) as Record<string, any>;
 }
 
-describe("專案無法解析", () => {
-  test("沒有 SMILEWORK_PROJECT 且 cwd 不是 git repo 時回 PROJECT_UNRESOLVED", async () => {
-    await withTempHome("work-project", async (home, root) => {
+describe("非 git 專案的工作工具", () => {
+  test("cwd 不是 git repo 時仍可建立工作，專案以路徑識別", async () => {
+    await withTempHome("work-project", async (home) => {
       await withTempDir("work-cwd", async (cwd) => {
         const tool = toolByName("work_create");
         if (!tool) throw new Error("registry 缺少 work_create。");
@@ -24,15 +25,42 @@ describe("專案無法解析", () => {
         };
         delete env.SMILEWORK_PROJECT;
 
-        const payload = parse(await runTool(tool, { title: "無專案" }, { env, cwd }));
-        expect(payload).toMatchObject({ ok: false, code: "PROJECT_UNRESOLVED" });
-        expect(typeof payload.nextAction).toBe("string");
+        const payload = parse(await runTool(tool, { title: "非 git 專案" }, { env, cwd }));
+        expect(payload.ok).toBe(true);
+        expect(payload.data.work.projectId).toMatch(/^[a-f0-9]{16}$/);
+        expect(payload.data.work.title).toBe("非 git 專案");
       });
     });
   });
 
-  test("專案路徑不存在時一樣回 PROJECT_UNRESOLVED", async () => {
-    await withTempHome("work-project", async (home) => {
+  test("有 .ultrawork 的目錄會接到舊 projectId，而不是建立新專案", async () => {
+    await withTempHome("work-legacy-project", async (home) => {
+      await withTempDir("work-legacy-cwd", async (cwd) => {
+        mkdirSync(join(cwd, ".ultrawork"), { recursive: true });
+        writeFileSync(
+          join(cwd, ".ultrawork", "tasks.json"),
+          JSON.stringify({ projectId: "legacy-project", projectPath: cwd }),
+          "utf8",
+        );
+
+        const tool = toolByName("work_create");
+        if (!tool) throw new Error("registry 缺少 work_create。");
+        const env: NodeJS.ProcessEnv = {
+          ...process.env,
+          SMILEWORK_HOME: home,
+          SMILEWORK_ACTOR: "build",
+        };
+        delete env.SMILEWORK_PROJECT;
+
+        const payload = parse(await runTool(tool, { title: "舊專案工作" }, { env, cwd }));
+        expect(payload.ok).toBe(true);
+        expect(payload.data.work.projectId).toBe("legacy-project");
+      });
+    });
+  });
+
+  test("專案路徑不存在時回 PROJECT_UNRESOLVED", async () => {
+    await withTempHome("work-project-missing", async (home) => {
       const env: NodeJS.ProcessEnv = {
         ...process.env,
         SMILEWORK_HOME: home,

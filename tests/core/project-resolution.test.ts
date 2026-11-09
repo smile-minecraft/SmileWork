@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveProject, requireProject } from "../../src/project/index.ts";
+import { projectIdFromPath } from "../../src/shared/hash.ts";
 import { createGitRepo, createGitWorktree } from "../helpers/git.ts";
 import { withTempDir } from "../helpers/temp.ts";
 
@@ -99,32 +100,73 @@ describe("專案解析", () => {
     });
   });
 
-  test("非 git 目錄回 NOT_GIT_REPOSITORY，且寫入要求明確失敗", async () => {
+  test("非 git 目錄以正規化絕對路徑建立穩定的專案身分", async () => {
     await withTempDir("resolve-nongit", async (root) => {
       const plain = join(root, "plain");
-      await Bun.write(join(plain, "file.txt"), "x");
+      mkdirSync(plain);
+      writeFileSync(join(plain, "file.txt"), "x", "utf8");
+      const realPlain = realpathSync(plain);
 
-      expect(() => resolveProject({ explicitPath: plain, env: {}, cwd: root })).toThrow(
-        expect.objectContaining({ code: "NOT_GIT_REPOSITORY" }),
-      );
+      const resolved = resolveProject({ explicitPath: plain, env: {}, cwd: root });
+      expect(resolved.projectId).toBe(projectIdFromPath(realPlain));
+      expect(resolved.worktreePath).toBe(realPlain);
+      expect(resolved.rootPath).toBe(realPlain);
+      expect(resolved.commonDir).toBe(`path:${realPlain}`);
 
-      expect(() => requireProject({ explicitPath: plain, env: {}, cwd: root })).toThrow(
-        expect.objectContaining({ code: "NOT_GIT_REPOSITORY" }),
+      const trailing = resolveProject({ explicitPath: `${plain}/`, env: {}, cwd: root });
+      expect(trailing.projectId).toBe(resolved.projectId);
+
+      const link = join(root, "link");
+      symlinkSync(plain, link, "dir");
+      const viaLink = resolveProject({ explicitPath: link, env: {}, cwd: root });
+      expect(viaLink.projectId).toBe(resolved.projectId);
+
+      expect(() => requireProject({ explicitPath: join(root, "other"), env: {}, cwd: root })).toThrow(
+        expect.objectContaining({ code: "PROJECT_NOT_FOUND" }),
       );
     });
   });
 
-  test("完全無法解析時回 PROJECT_REQUIRED 並附下一步", async () => {
-    await withTempDir("resolve-required", async (root) => {
-      let error: unknown;
-      try {
-        requireProject({ env: {}, cwd: root });
-      } catch (caught) {
-        error = caught;
-      }
+  test("有 .ultrawork/tasks.json 的非 git 目錄會接回舊 projectId", async () => {
+    await withTempDir("resolve-legacy", async (root) => {
+      const legacyRoot = join(root, "legacy");
+      const nested = join(legacyRoot, "sub", "dir");
+      mkdirSync(nested, { recursive: true });
+      mkdirSync(join(legacyRoot, ".ultrawork"), { recursive: true });
+      writeFileSync(
+        join(legacyRoot, ".ultrawork", "tasks.json"),
+        JSON.stringify({ projectId: "legacy-project", projectPath: legacyRoot }),
+        "utf8",
+      );
 
-      expect(error).toMatchObject({ code: "PROJECT_REQUIRED" });
-      expect((error as { nextAction?: string }).nextAction).toContain("SMILEWORK_PROJECT");
+      const fromRoot = resolveProject({ explicitPath: legacyRoot, env: {}, cwd: root });
+      expect(fromRoot.projectId).toBe("legacy-project");
+      expect(fromRoot.commonDir).toBe("import:legacy-project");
+      expect(fromRoot.rootPath).toBe(realpathSync(legacyRoot));
+
+      const fromNested = resolveProject({ explicitPath: nested, env: {}, cwd: root });
+      expect(fromNested.projectId).toBe("legacy-project");
+      expect(fromNested.worktreePath).toBe(realpathSync(nested));
+    });
+  });
+
+  test("家目錄的 .ultrawork 不會把底下的新資料夾都認成同一個舊專案", async () => {
+    await withTempDir("resolve-home-boundary", async (root) => {
+      const home = join(root, "home");
+      const fresh = join(home, "dev", "new-project");
+      mkdirSync(fresh, { recursive: true });
+      mkdirSync(join(home, ".ultrawork"), { recursive: true });
+      writeFileSync(
+        join(home, ".ultrawork", "tasks.json"),
+        JSON.stringify({ projectId: "home-project" }),
+        "utf8",
+      );
+
+      const fromHome = resolveProject({ explicitPath: home, env: { HOME: home }, cwd: root });
+      expect(fromHome.projectId).toBe("home-project");
+
+      const fromFresh = resolveProject({ explicitPath: fresh, env: { HOME: home }, cwd: root });
+      expect(fromFresh.projectId).toBe(projectIdFromPath(realpathSync(fresh)));
     });
   });
 });

@@ -54,7 +54,7 @@ describe("固定結果外框", () => {
     expect(result.message).toContain("boom");
   });
 
-  test("需要專案的 handler 無法解析時回 PROJECT_REQUIRED 外框", async () => {
+  test("需要專案的 handler 無法解析時回 PROJECT_NOT_FOUND 外框", async () => {
     await withTempDir("tool-project-required", async (cwd) => {
       const tool: ToolDefinition = {
         name: "write_probe",
@@ -68,13 +68,16 @@ describe("固定結果外框", () => {
         },
       };
 
-      const call = await runTool(tool, {}, { env: {}, cwd });
+      const call = await runTool(tool, {}, {
+        env: { SMILEWORK_PROJECT: join(cwd, "missing") },
+        cwd,
+      });
       const content = call.content[0];
       const text = content?.type === "text" ? content.text : "";
       const payload = JSON.parse(text) as Record<string, unknown>;
 
       expect(call.isError).toBe(true);
-      expect(payload).toMatchObject({ ok: false, code: "PROJECT_REQUIRED" });
+      expect(payload).toMatchObject({ ok: false, code: "PROJECT_NOT_FOUND" });
       expect(typeof payload.nextAction).toBe("string");
     });
   });

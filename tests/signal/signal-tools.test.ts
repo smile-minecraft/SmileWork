@@ -241,7 +241,7 @@ describe("signal_note", () => {
       const projectless = await callWith(
         signalNote,
         { kind: "lesson", content: "沒有專案" },
-        env,
+        { ...env, SMILEWORK_PROJECT: join(fixture.root, "missing") },
         fixture.root,
       );
       expect(projectless.ok).toBe(false);

@@ -131,14 +131,23 @@ function databaseCheck(database: DatabaseHealth): DoctorCheck {
   );
 }
 
+function projectKind(commonDir: string | null): string {
+  if (commonDir?.startsWith("import:")) return "舊 ultrawork 專案";
+  if (commonDir?.startsWith("path:")) return "路徑專案";
+  return "git 專案";
+}
+
 function projectCheck(project: ProjectHealth): DoctorCheck {
   if (project.status === "resolved") {
-    return okCheck("專案", `${project.projectId}（${project.worktreePath}）`);
+    return okCheck(
+      "專案",
+      `${project.projectId}（${projectKind(project.commonDir)}，${project.worktreePath}）`,
+    );
   }
   return warnCheck(
     "專案",
     `無法解析：${project.reason ?? "未知原因"}`,
-    project.nextAction ?? "在 git repo 內執行，或設定 SMILEWORK_PROJECT 指向 repo。",
+    project.nextAction ?? "在專案資料夾內執行，或用 SMILEWORK_PROJECT 指定存在的資料夾。",
   );
 }
 

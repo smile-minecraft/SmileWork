@@ -118,19 +118,35 @@ describe("健康狀態", () => {
     });
   });
 
-  test("專案無法解析時回 unresolved 與 warning，不讓 status 失敗", async () => {
-    await withStatusHome("status-project-missing", async ({ env, root }) => {
+  test("非 git 目錄以路徑專案解析", async () => {
+    await withStatusHome("status-project-path", async ({ env, root }) => {
       const plain = join(root, "plain");
       mkdirSync(plain, { recursive: true });
 
       const report = inspectStatus({ env, cwd: plain });
 
+      expect(report.project.status).toBe("resolved");
+      expect(report.project.projectId).toMatch(/^[0-9a-f]{16}$/);
+      expect(report.project.commonDir).toBe(`path:${realpathSync(plain)}`);
+    });
+  });
+
+  test("專案無法解析時回 unresolved 與 warning，不讓 status 失敗", async () => {
+    await withStatusHome("status-project-missing", async ({ env, root }) => {
+      const plain = join(root, "plain");
+      mkdirSync(plain, { recursive: true });
+
+      const report = inspectStatus({
+        env: { ...env, SMILEWORK_PROJECT: join(root, "missing") },
+        cwd: plain,
+      });
+
       expect(report.project).toMatchObject({
         status: "unresolved",
         projectId: null,
-        code: "PROJECT_REQUIRED",
+        code: "PROJECT_NOT_FOUND",
       });
-      expect(report.project.reason).toContain("git repo");
+      expect(report.project.reason).toContain("找不到專案目錄");
       expect(report.warnings.some((warning) => warning.includes("專案無法解析"))).toBe(true);
     });
   });
@@ -311,7 +327,7 @@ describe("健康狀態", () => {
     });
   });
 
-  test("工具回傳固定成功外框，資料庫與專案都缺失時仍 ok:true 並帶 warnings", async () => {
+  test("工具回傳固定成功外框，資料庫缺失時仍 ok:true 並帶 warnings", async () => {
     await withStatusHome("status-envelope", async ({ env, home, root }) => {
       const snapshot = new Map(
         ["HOME", "SMILEWORK_HOME", "SMILEWORK_PROJECT", "SMILEWORK_ACTOR", "SMILEWORK_MODEL", "SMILEWORK_PROFILE"].map(
@@ -344,7 +360,7 @@ describe("健康狀態", () => {
         expect((payload.data.warnings as string[]).length).toBeGreaterThan(0);
         expect(payload.data).toMatchObject({
           database: { status: "missing" },
-          project: { status: "unresolved" },
+          project: { status: "resolved" },
           actor: { name: "unknown" },
           profile: { name: "worker" },
         });

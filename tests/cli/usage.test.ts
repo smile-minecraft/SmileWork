@@ -83,8 +83,8 @@ describe("usage 子命令", () => {
 
       expect(result.exitCode).toBe(0);
       const payload = parseJson<UsagePayload>(result.stdout);
+      expect(payload.usage.projectId).toMatch(/^[a-f0-9]{16}$/);
       expect(payload.usage).toMatchObject({
-        projectId: null,
         layer: "global",
         knowledgeId: "topic-alpha",
         version: 3,
@@ -101,7 +101,7 @@ describe("usage 子命令", () => {
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({
         usage_id: payload.usage.usageId,
-        project_id: null,
+        project_id: payload.usage.projectId,
         layer: "global",
         knowledge_id: "topic-alpha",
         version: 3,

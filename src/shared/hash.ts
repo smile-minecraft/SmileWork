@@ -13,3 +13,8 @@ export function sha256Hex(content: string | Uint8Array): string {
 export function projectIdFromCommonDir(commonDir: string): string {
   return sha256Hex(commonDir).slice(0, 16);
 }
+
+/** 非 git 專案的路徑識別碼；加前綴避免和 git common dir 的雜湊撞在一起。 */
+export function projectIdFromPath(path: string): string {
+  return sha256Hex(`path:${path}`).slice(0, 16);
+}
