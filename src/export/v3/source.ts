@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 
+import { canonicalizePath } from "../../shared/paths.ts";
 import { compareCodePoints, sha256Bytes, sha256Text } from "./canonical.ts";
 import { ExportV3Error } from "./errors.ts";
 import type { Layer } from "./types.ts";
@@ -661,7 +662,21 @@ export function readSource(
   warnings: WarningCollector,
 ): SourceData {
   const projectRoot = resolveProjectSource(options.project);
-  const globalRoot = options.global === undefined ? undefined : resolveGlobalSource(options.global);
+  let globalRoot = options.global === undefined ? undefined : resolveGlobalSource(options.global);
+  /**
+   * 專案根目錄剛好就是全域設定資料夾時，同一個 .ultrawork 會被當成兩層各讀一次，
+   * 匯出包會出現重複的知識、訊號與 raw 檔。只讀一次並以 project 層為準；
+   * 需要全域層時請把 --global 指到另一個來源。
+   */
+  if (
+    globalRoot !== undefined &&
+    canonicalizePath(globalRoot) === canonicalizePath(projectRoot)
+  ) {
+    warnings.add(
+      `GLOBAL_SOURCE_SAME_AS_PROJECT: ${globalRoot} 與專案來源相同，只讀一次並視為 project 層`,
+    );
+    globalRoot = undefined;
+  }
 
   let plansRead: RegistryRead | undefined;
   try {

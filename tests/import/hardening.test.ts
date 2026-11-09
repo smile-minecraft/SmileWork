@@ -190,6 +190,34 @@ function replaceWithSymlink(path: string, target: string, type: "dir" | "file"):
 }
 
 describe("匯入與匯出的資料邊界", () => {
+  test("匯入在套用階段失敗時，CLI 回非零結束碼", async () => {
+    const fixture = buildV3Package();
+    try {
+      await withTempHome("import-failure-exit", async (home) => {
+        const db = openDatabase({ home });
+        try {
+          db.exec(
+            `CREATE TRIGGER reject_work BEFORE INSERT ON work_items
+             BEGIN SELECT RAISE(ABORT, 'forced work failure'); END;`,
+          );
+        } finally {
+          db.close();
+        }
+
+        const result = await runCli(["import", fixture.packageDir], {
+          ...process.env,
+          SMILEWORK_HOME: home,
+        });
+
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain("import：");
+        expect(result.stderr).toContain("forced work failure");
+      });
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   test("manifest.json 是 symlink 時整包拒絕，不讀外部內容", async () => {
     const fixture = buildV3Package();
     const external = makeTempDir("manifest-external");

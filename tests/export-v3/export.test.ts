@@ -69,6 +69,40 @@ function expectRawBytesMatch(
 }
 
 describe("v3 匯出器", () => {
+  test("--project 與 --global 指向同一個 .ultrawork 時只讀一次，不產生重複資料", () => {
+    const source = copyFixture("v2-data");
+    const out = join(makeTempDir("same-source"), "package");
+    try {
+      const result = exportV3({
+        project: source,
+        global: source,
+        out,
+        producerVersion: "0.1.0",
+        createdAt: FIXED_CREATED_AT,
+      });
+
+      expect(result.manifest.source.layers).toEqual(["project"]);
+      expect(result.warnings.some((warning) => warning.startsWith("GLOBAL_SOURCE_SAME_AS_PROJECT"))).toBe(
+        true,
+      );
+
+      const pkg = validatePackage(out);
+      expect(pkg.knowledge.length).toBeGreaterThan(0);
+      expect(pkg.mapping.every((mapping) => mapping.layer === "project")).toBe(true);
+
+      const workIds = pkg.work.map((entry) => entry.workId);
+      expect(new Set(workIds).size).toBe(workIds.length);
+
+      const knowledgeIds = pkg.knowledge.map((entry) => entry.knowledgeId);
+      expect(new Set(knowledgeIds).size).toBe(knowledgeIds.length);
+      const signalIds = pkg.signals.map((entry) => entry.signalId);
+      expect(new Set(signalIds).size).toBe(signalIds.length);
+    } finally {
+      removeDir(source);
+      removeDir(out);
+    }
+  });
+
   test("fixture 匯出成合法套件，來源不變，raw 逐位元組相同", () => {
     const project = copyFixture("v2-data");
     const out = join(makeTempDir("out"), "package");
