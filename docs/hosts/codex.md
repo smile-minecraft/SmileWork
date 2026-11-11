@@ -26,6 +26,6 @@ codex mcp list
 
 ## 使用
 
-先請 Codex 呼叫 `status`，確認 profile、資料庫路徑與專案識別碼。接著用 `work_create` 建立工作、`work_update` 推進狀態、`verify_run` 留下伺服器證據，最後用 `work_review` 與 `work_complete` 完成審查與結案。
+先請 Codex 呼叫 `status`，確認 profile、資料庫路徑與專案識別碼。接著用 `work_create` 建立工作、`work_update` 推進狀態、`verify_run` 留下伺服器證據。非高風險工作可以直接用 `work_complete` 結案；高風險或需要獨立審查時，先請非 owner 用 `work_review` 記錄 `approve`，再結案。
 
 整理代理請再加一個 `[mcp_servers.smilework-curator]` 區塊，`SMILEWORK_PROFILE` 設為 `curator`；設定範例見[整理代理](curator.md)。

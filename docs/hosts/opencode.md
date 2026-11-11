@@ -39,6 +39,6 @@ OpenCode 從專案的 `opencode.json` 或 `opencode.jsonc` 讀取設定，也可
 
 ## 使用
 
-先請代理呼叫 `status`，確認 profile 與專案識別碼。日常流程是 `work_list` → `work_get` → `work_update`，完成後用 `work_review` 記錄審查，再用 `work_complete` 結案。
+先請代理呼叫 `status`，確認 profile 與專案識別碼。日常流程是 `work_list` → `work_get` → `work_update`；非高風險工作完成後直接用 `work_complete` 結案，高風險或需要獨立審查時才用 `work_review` 記錄審查。
 
 整理代理請另建一個伺服器項目，名稱可以用 `smilework-curator`，`SMILEWORK_PROFILE` 設為 `curator`；設定範例見[整理代理](curator.md)。

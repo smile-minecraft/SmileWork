@@ -1,8 +1,29 @@
 # 變更紀錄
 
+## 0.2.1 - 2026-11-11
+
+這個版本讓非高風險工作可以直接結案，並改善驗收比對與 Swift 驗證的診斷。
+
+### 修正
+
+- 驗收結果的比對改用 NFKC、收合連續空白並去掉前後空白，資料庫與回傳仍保留工作定義的原始字串。真的不一致時，`ACCEPTANCE_INCOMPLETE` 的 `data.suggestions` 提供 `missing`、`reported` 與 `distance`，訊息最多列出 3 條缺少，其餘以「另有 N 條缺少」表示。
+- `verify_run` 在 macOS 上使用實際的 Swift 工具鏈：PATH 的 `swift` 若是 `/usr/bin/swift` 系統 stub，會以 `/usr/bin/xcrun --find swift` 依 `DEVELOPER_DIR` 或 `xcode-select` 的設定解析；xcrun 失敗時退回 PATH 的 `swift`。Swift 失敗且輸出出現 `Invalid manifest`，或同時出現 `Undefined symbols` 與 `PackageDescription` 時，結果附上 `hint`，並寫進 evidence details、輸出檔與 summary。單獨出現 `PackageDescription` 或 `Undefined symbols` 不會誤報。
+- 結案寫入的 `acceptanceResults.items[].criterion` 保留工作定義的原始字串（包含前後空白），修正匯入後的工作在匯出時出現 `DATABASE_ACCEPTANCE_MISMATCH` 的回歸。
+
+### 變更
+
+- `work_complete` 允許非高風險工作從 `in_progress` 直接結案，條件是驗收、證據與依賴都通過。高風險工作仍須在 `review` 狀態、由非 owner 的審查者 `approve`，並至少有一筆成功且未逾時的伺服器證據。`open` 與 `blocked` 仍須先轉到 `in_progress`。目前版本記錄的 `reject` 會擋下非高風險的直接結案；工作改版後，那筆 `reject` 視為舊版本。
+- `work_update` 回傳新增的 `addedEvidence`，只包含本次新增的一般證據（`handoff` 與 `ruling` 不算），沒有新增時是空陣列。`data.evidence` 仍保留完整清單。
+
+### 已知限制
+
+- `worker` 的 `tools/list` 是 2993／3000 token（o200k），只剩 7 token；後續新增工具描述前要先量測。
+- `work_update` 目前可以把 `risk` 從 `high` 改成 `low` 再直接結案。這是既有行為，沒有在 0.2.1 修正，後續要處理。
+- `verify_run` 的 Swift 提示只說明工具鏈的選擇；實際能不能執行 SwiftPM 仍取決於機器上的 Xcode 或 Command Line Tools。
+
 ## 0.2.0 - 2026-11-09
 
-這個版本讓多個代理在同一份工作與知識上接得下去，也修掉實際使用時卡住的專案解析、migration 與匯出問題。尚未發佈。
+這個版本讓多個代理在同一份工作與知識上接得下去，也修掉實際使用時卡住的專案解析、migration 與匯出問題。未單獨發佈，內容包含在 0.2.1。
 
 ### 新增
 
