@@ -12,7 +12,7 @@ export const tool = defineTool({
   name: "work_complete",
   title: "結案工作",
   description:
-    "檢查驗收結果、證據、依賴與高風險審查後結案；不通過時回報缺少的項目與下一步。",
+    "檢查驗收、證據、依賴與審查後結案；非高風險可從 in_progress 直接結案，高風險需非 owner approve 與伺服器證據。",
   domain: "work",
   inputSchema: z.object({
     id: z.string().min(1),

@@ -6,6 +6,7 @@ import type { ToolContext } from "../../../src/mcp/types.ts";
 import type { ToolResult } from "../../../src/shared/result.ts";
 import { tool as completeTool } from "../../../src/tools/work/complete.ts";
 import { tool as reviewTool } from "../../../src/tools/work/review.ts";
+import { tool as updateTool } from "../../../src/tools/work/update.ts";
 import { insertTestProject, withTestDatabase } from "../../helpers/db.ts";
 
 export interface LifecycleFixture {
@@ -181,4 +182,12 @@ export async function callReview(
 ): Promise<ToolResult> {
   const parsed = reviewTool.inputSchema.parse(input);
   return reviewTool.handler(parsed, context);
+}
+
+export async function callUpdate(
+  context: ToolContext,
+  input: Record<string, unknown>,
+): Promise<ToolResult> {
+  const parsed = updateTool.inputSchema.parse(input);
+  return updateTool.handler(parsed, context);
 }

@@ -543,21 +543,34 @@ describe("work_complete 的錯誤情況", () => {
     });
   });
 
-  test("非法狀態轉移被拒絕", async () => {
+  test("open 與 blocked 不能直接結案，必須先轉 in_progress", async () => {
     await withLifecycle(async ({ db, projectId, context }) => {
-      const inProgress = insertWork(db, projectId, { status: "in_progress", acceptance: [] });
-      const fromInProgress = await callComplete(context, {
-        id: inProgress,
+      const open = insertWork(db, projectId, { status: "open", acceptance: [] });
+      const fromOpen = await callComplete(context, { id: open, expectedVersion: 1, acceptance: [] });
+      expect(fromOpen.ok).toBe(false);
+      if (fromOpen.ok) return;
+      expect(fromOpen.code).toBe("INVALID_TRANSITION");
+      expect(fromOpen.nextAction).toContain("work_update");
+      expect(fromOpen.nextAction).toContain("in_progress");
+      expect(readWork(db, open)?.status).toBe("open");
+
+      const blocked = insertWork(db, projectId, { status: "blocked", acceptance: [] });
+      const fromBlocked = await callComplete(context, {
+        id: blocked,
         expectedVersion: 1,
         acceptance: [],
       });
-      expect(fromInProgress.ok).toBe(false);
-      if (fromInProgress.ok) return;
-      expect(fromInProgress.code).toBe("INVALID_TRANSITION");
-      expect(fromInProgress.nextAction).toContain("work_review");
-      expect(fromInProgress.nextAction).toContain("expectedVersion: 1");
-      expect(fromInProgress.nextAction).toContain("work_complete");
+      expect(fromBlocked.ok).toBe(false);
+      if (fromBlocked.ok) return;
+      expect(fromBlocked.code).toBe("INVALID_TRANSITION");
+      expect(fromBlocked.nextAction).toContain("work_update");
+      expect(fromBlocked.nextAction).toContain("in_progress");
+      expect(readWork(db, blocked)?.status).toBe("blocked");
+    });
+  });
 
+  test("終態工作不能再結案", async () => {
+    await withLifecycle(async ({ db, projectId, context }) => {
       const done = insertWork(db, projectId, {
         status: "done",
         resolution: "completed",

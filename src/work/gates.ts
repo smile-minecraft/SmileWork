@@ -84,81 +84,253 @@ export function primaryIssue(issues: readonly GateIssue[]): GateIssue | null {
   return primary;
 }
 
+interface AcceptanceSuggestion {
+  missing: string;
+  reported: string;
+  distance: number;
+}
+
 interface AcceptanceIndex {
   expected: string[];
-  provided: Map<string, AcceptanceResultItem[]>;
+  /** 與 expected 平行的陣列，記錄每一條驗收條件對到的回報結果。 */
+  matches: AcceptanceResultItem[][];
   missing: string[];
   unknown: string[];
   duplicates: string[];
   unmet: string[];
+  suggestions: AcceptanceSuggestion[];
 }
 
-function indexAcceptance(work: WorkItem, results: readonly AcceptanceResultItem[]): AcceptanceIndex {
-  const expected = work.acceptance.map((criterion) => criterion.trim());
-  const expectedSet = new Set(expected);
-  const provided = new Map<string, AcceptanceResultItem[]>();
+/** 驗收字串的比對鍵：NFKC、連續空白收成一個、去掉前後空白。 */
+function acceptanceKey(value: string): string {
+  return value.normalize("NFKC").replace(/\s+/gu, " ").trim();
+}
+
+/** 以 Unicode 字元為單位計算 Levenshtein 距離，代理對不會被算成兩個字。 */
+function levenshteinDistance(left: string, right: string): number {
+  const a = Array.from(left);
+  const b = Array.from(right);
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  let current = new Array<number>(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i++) {
+    current[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const substitution = (previous[j - 1] ?? 0) + (a[i - 1] === b[j - 1] ? 0 : 1);
+      const insertion = (current[j - 1] ?? 0) + 1;
+      const deletion = (previous[j] ?? 0) + 1;
+      current[j] = Math.min(substitution, insertion, deletion);
+    }
+    [previous, current] = [current, previous];
+  }
+  return previous[b.length] ?? 0;
+}
+
+/** 只為真的不一致的缺項提供距離最近的候選，距離太遠就不猜。 */
+function acceptanceSuggestions(
+  missing: readonly string[],
+  unknown: readonly string[],
+): AcceptanceSuggestion[] {
+  if (unknown.length === 0) return [];
+
+  const suggestions: AcceptanceSuggestion[] = [];
+  const seen = new Set<string>();
+  for (const criterion of missing) {
+    if (seen.has(criterion)) continue;
+    seen.add(criterion);
+
+    const limit = criterion.length <= 2 ? 1 : Math.max(2, Math.ceil(criterion.length / 4));
+    let closest: AcceptanceSuggestion | null = null;
+    for (const reported of unknown) {
+      const distance = levenshteinDistance(criterion, reported);
+      if (distance > limit) continue;
+      if (!closest || distance < closest.distance) {
+        closest = { missing: criterion, reported, distance };
+      }
+    }
+    if (closest) suggestions.push(closest);
+  }
+  return suggestions;
+}
+
+function buildAcceptanceIndex(
+  acceptance: readonly string[],
+  results: readonly AcceptanceResultItem[],
+): AcceptanceIndex {
+  const expected = acceptance.map((criterion) => criterion.trim());
+  const keys = expected.map(acceptanceKey);
+  const keyCounts = new Map<string, number>();
+  for (const key of keys) keyCounts.set(key, (keyCounts.get(key) ?? 0) + 1);
+  const exactMatchKeys = new Set(
+    [...keyCounts.entries()].filter(([, count]) => count > 1).map(([key]) => key),
+  );
+
+  const matches: AcceptanceResultItem[][] = expected.map(() => []);
+  const unknown: string[] = [];
+  const seenUnknown = new Set<string>();
 
   for (const item of results) {
-    const key = item.criterion.trim();
-    const existing = provided.get(key);
-    if (existing) existing.push(item);
-    else provided.set(key, [item]);
+    const criterion = item.criterion.trim();
+    const key = acceptanceKey(item.criterion);
+    let matched = false;
+    for (let position = 0; position < expected.length; position++) {
+      const expectedKey = keys[position]!;
+      const isMatch = exactMatchKeys.has(expectedKey)
+        ? criterion === expected[position]
+        : key === expectedKey;
+      if (isMatch) {
+        matches[position]!.push(item);
+        matched = true;
+      }
+    }
+    if (!matched && !seenUnknown.has(criterion)) {
+      seenUnknown.add(criterion);
+      unknown.push(criterion);
+    }
   }
 
-  const missing = expected.filter((criterion) => !provided.has(criterion));
-  const unknown = [...provided.keys()].filter((criterion) => !expectedSet.has(criterion));
-  const duplicates = expected.filter((criterion) => (provided.get(criterion)?.length ?? 0) > 1);
-  const unmet = expected.filter((criterion) => {
-    const items = provided.get(criterion);
-    return items?.length === 1 && items[0]?.met === false;
+  const missing = expected.filter((_, position) => matches[position]!.length === 0);
+  const duplicates = expected.filter((_, position) => matches[position]!.length > 1);
+  const unmet = expected.filter((_, position) => {
+    const items = matches[position]!;
+    return items.length === 1 && items[0]?.met === false;
   });
 
-  return { expected, provided, missing, unknown, duplicates, unmet };
-}
-
-function nextStepForCompletion(status: WorkStatus): string {
-  switch (status) {
-    case "open":
-      return "先用 work_update 把工作轉到 in_progress；完成後用 work_review 記錄審查，再結案。";
-    case "in_progress":
-      return "先用 work_review 記錄審查，把工作推進到 review，再結案。";
-    case "blocked":
-      return "先解除阻擋並轉回 in_progress；完成後用 work_review 記錄審查，再結案。";
-    case "done":
-    case "cancelled":
-      return "工作已經在終態，不能變更；需要新工作時請另建一項。";
-    case "review":
-      return "工作已經在 review 狀態。";
-  }
-}
-
-function transitionIssue(work: WorkItem): GateIssue | null {
-  if (work.status === "review") return null;
   return {
-    code: WORK_ERROR_CODES.invalidTransition,
-    message: `工作目前的狀態是 ${work.status}，只有 review 狀態可以結案。`,
-    nextAction: nextStepForCompletion(work.status),
-    data: { currentStatus: work.status, requiredStatus: "review" },
+    expected,
+    matches,
+    missing,
+    unknown,
+    duplicates,
+    unmet,
+    suggestions: acceptanceSuggestions(missing, unknown),
   };
 }
 
+/**
+ * 依工作定義的順序取出每條驗收唯一對應的結果。
+ * 回傳的 criterion 保留呼叫端提供的原始字串，只有比對使用正規化 key；
+ * 結案寫入與閘門共用同一套比對規則，避免通過閘門後找不到結果。
+ */
+export function matchAcceptanceResults(
+  acceptance: readonly string[],
+  results: readonly AcceptanceResultItem[],
+): Array<{ criterion: string; result: AcceptanceResultItem }> {
+  const index = buildAcceptanceIndex(acceptance, results);
+  return index.expected.map((criterion, position) => {
+    const matched = index.matches[position] ?? [];
+    const [result] = matched;
+    if (matched.length !== 1 || !result) {
+      throw new Error(`驗收條件「${criterion}」在閘門通過後沒有唯一對應的結果。`);
+    }
+    return { criterion: acceptance[position]!, result };
+  });
+}
+
+function completeStep(work: WorkItem, version: number): string {
+  return `用 work_complete（id: ${work.workId}, expectedVersion: ${version}）結案。`;
+}
+
+function reviewThenCompleteStep(work: WorkItem, inProgressVersion: number): string {
+  return `用 work_review（id: ${work.workId}, expectedVersion: ${inProgressVersion}, verdict: approve）請非 owner 的審查者記錄 approve，再${completeStep(work, inProgressVersion + 1)}`;
+}
+
+function completionAllowed(work: WorkItem): boolean {
+  if (work.status === "review") return true;
+  return work.status === "in_progress" && work.risk !== "high";
+}
+
+function transitionIssue(work: WorkItem): GateIssue | null {
+  if (completionAllowed(work)) return null;
+
+  if (work.status === "in_progress") {
+    // 走到這裡只剩高風險工作：in_progress 直接結案只開放給非高風險。
+    return {
+      code: WORK_ERROR_CODES.invalidTransition,
+      message: "這是高風險工作，從 in_progress 結案前需要非 owner 的審查者 approve。",
+      nextAction: `先${reviewThenCompleteStep(work, work.version)}`,
+      data: { currentStatus: work.status, requiredStatus: "review", risk: work.risk },
+    };
+  }
+
+  const updateStep = `用 work_update（id: ${work.workId}, expectedVersion: ${work.version}）`;
+
+  switch (work.status) {
+    case "review":
+      return null;
+    case "open":
+      return {
+        code: WORK_ERROR_CODES.invalidTransition,
+        message: "工作目前的狀態是 open，必須先轉到 in_progress 才能結案。",
+        nextAction:
+          work.risk === "high"
+            ? `先${updateStep}把工作轉到 in_progress，再${reviewThenCompleteStep(work, work.version + 1)}`
+            : `先${updateStep}把工作轉到 in_progress，再${completeStep(work, work.version + 1)}`,
+        data: { currentStatus: work.status, requiredStatus: "in_progress" },
+      };
+    case "blocked":
+      return {
+        code: WORK_ERROR_CODES.invalidTransition,
+        message: "工作目前的狀態是 blocked，不能直接結案。",
+        nextAction:
+          work.risk === "high"
+            ? `先解除阻擋，並${updateStep}轉回 in_progress，再${reviewThenCompleteStep(work, work.version + 1)}`
+            : `先解除阻擋，並${updateStep}轉回 in_progress，再${completeStep(work, work.version + 1)}`,
+        data: { currentStatus: work.status, requiredStatus: "in_progress" },
+      };
+    case "done":
+    case "cancelled":
+      return {
+        code: WORK_ERROR_CODES.invalidTransition,
+        message: `工作目前的狀態是 ${work.status}，不能結案。`,
+        nextAction: "工作已經在終態，不能變更；需要新工作時請另建一項。",
+        data: { currentStatus: work.status },
+      };
+  }
+}
+
 function acceptanceIssue(index: AcceptanceIndex): GateIssue | null {
-  const { missing, unknown, duplicates, unmet } = index;
+  const { missing, unknown, duplicates, unmet, suggestions } = index;
   if (missing.length === 0 && unknown.length === 0 && duplicates.length === 0 && unmet.length === 0) {
     return null;
   }
 
+  const suggestionByMissing = new Map(
+    suggestions.map((suggestion) => [suggestion.missing, suggestion]),
+  );
+  const orderedMissing = [
+    ...missing.filter((criterion) => suggestionByMissing.has(criterion)),
+    ...missing.filter((criterion) => !suggestionByMissing.has(criterion)),
+  ];
+  const listed = orderedMissing.slice(0, 3);
+
   const parts: string[] = [];
-  if (missing.length > 0) parts.push(`缺少 ${missing.length} 條驗收結果`);
+  for (const criterion of listed) {
+    const suggestion = suggestionByMissing.get(criterion);
+    parts.push(
+      suggestion
+        ? `缺少「${criterion}」；最接近的回報是「${suggestion.reported}」（差 ${suggestion.distance} 個字）`
+        : `缺少「${criterion}」`,
+    );
+  }
+  if (missing.length > listed.length) parts.push(`另有 ${missing.length - listed.length} 條缺少`);
   if (unknown.length > 0) parts.push(`有 ${unknown.length} 條不屬於這個工作`);
   if (duplicates.length > 0) parts.push(`有 ${duplicates.length} 條重複回報`);
   if (unmet.length > 0) parts.push(`有 ${unmet.length} 條未達成`);
 
+  const actions: string[] = [];
+  if (missing.length > 0) actions.push("缺少的項目先用 work_get 讀取完整驗收條件，逐項補上回報");
+  if (unknown.length > 0) actions.push("不屬於工作的項目改成工作定義的驗收字串");
+  if (unmet.length > 0) actions.push("未達成的項目處理到 met=true");
+  if (duplicates.length > 0) actions.push("重複回報的項目只保留一筆");
+
   return {
     code: WORK_ERROR_CODES.acceptanceIncomplete,
-    message: `驗收結果不完整：${parts.join("、")}。`,
-    nextAction: "用 work_get 讀取完整驗收條件，逐項回報結果，並把未達成的項目處理到 met=true。",
-    data: { missing, unknown, duplicates, unmet },
+    message: `驗收結果不完整：${parts.join("；")}。`,
+    nextAction: `${actions.join("；")}。`,
+    data: { missing, unknown, duplicates, unmet, suggestions },
   };
 }
 
@@ -171,9 +343,9 @@ function evidenceIssue(
   const missingEvidenceIds: string[] = [];
   const seenMissing = new Set<string>();
 
-  for (const criterion of index.expected) {
-    const items = index.provided.get(criterion);
-    if (!items || items.length !== 1) continue;
+  for (const [position, criterion] of index.expected.entries()) {
+    const items = index.matches[position] ?? [];
+    if (items.length !== 1) continue;
     const item = items[0];
     if (!item || !item.met) continue;
 
@@ -232,6 +404,27 @@ function dependencyIssue(dependencies: readonly DependencyReference[]): GateIssu
 function isSuccessfulServerEvidence(item: EvidenceReference): boolean {
   if (item.timedOut) return false;
   return item.exitCode === null || item.exitCode === 0;
+}
+
+/** 低風險免審查不能繞過目前在這個版本上仍然有效的 reject。 */
+function rejectedReviewIssue(work: WorkItem): GateIssue | null {
+  if (work.risk === "high") return null;
+
+  const review = work.review;
+  if (!review || review.verdict !== "reject") return null;
+  if (review.reviewedVersion === undefined || review.reviewedVersion < work.version) return null;
+
+  return {
+    code: WORK_ERROR_CODES.reviewRequired,
+    message: "最近一次審查的結論是 reject，不能直接結案。",
+    nextAction: "先處理審查意見，再由審查者用 work_review 記錄新的 approve 或 concerns 結論。",
+    data: {
+      verdict: review.verdict,
+      reviewer: review.reviewer,
+      reviewedVersion: review.reviewedVersion,
+      currentVersion: work.version,
+    },
+  };
 }
 
 function highRiskReviewIssues(
@@ -306,7 +499,7 @@ export function evaluateCompletionGates(input: CompletionGateInput): GateIssue[]
   const transition = transitionIssue(input.work);
   if (transition) issues.push(transition);
 
-  const index = indexAcceptance(input.work, input.acceptance);
+  const index = buildAcceptanceIndex(input.work.acceptance, input.acceptance);
   const acceptance = acceptanceIssue(index);
   if (acceptance) issues.push(acceptance);
 
@@ -315,6 +508,9 @@ export function evaluateCompletionGates(input: CompletionGateInput): GateIssue[]
 
   const dependency = dependencyIssue(input.dependencies);
   if (dependency) issues.push(dependency);
+
+  const rejected = rejectedReviewIssue(input.work);
+  if (rejected) issues.push(rejected);
 
   issues.push(...highRiskReviewIssues(input.work, input.evidence));
   return issues;

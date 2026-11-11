@@ -38,7 +38,7 @@ export const tool = defineTool({
   name: "work_update",
   title: "更新工作",
   description:
-    "以 expectedVersion 更新欄位、狀態、依賴與證據。evidence.kind=handoff 用 details 記錄交接（currentState、decisions、nextSteps、unverified）；kind=ruling 記錄決定（decision、rationale、costIfWrong）。版本不符時回 VERSION_CONFLICT。",
+    "以 expectedVersion 更新欄位、狀態、依賴與證據。evidence.kind=handoff 用 details 記錄交接；kind=ruling 記錄決定（decision、rationale、costIfWrong）。成功回應新增 data.addedEvidence（本次新增證據的 evidenceId，無新增時為空陣列）；data.evidence 保留完整清單。版本不符時回 VERSION_CONFLICT。",
   domain: "work",
   inputSchema,
   handler: (input, context) => {

@@ -153,4 +153,78 @@ describe("work_update 的人工證據", () => {
       }
     });
   });
+
+  test("第一次新增一筆證據，addedEvidence 只有該筆並包含 evidenceId", async () => {
+    await withWorkTools(async (context) => {
+      const work = expectOk(await context.call("work_create", { title: "新增證據" })).data.work;
+
+      const updated = expectOk(
+        await context.call("work_update", {
+          id: work.id,
+          expectedVersion: 1,
+          evidence: [{ kind: "note", summary: "第一筆證據", output: "內容一" }],
+        }),
+      );
+      expect(updated.data.work.version).toBe(2);
+      expect(updated.data.addedEvidence).toHaveLength(1);
+      expect(updated.data.addedEvidence[0].evidenceId).toBeDefined();
+      expect(updated.data.addedEvidence[0].summary).toBe("第一筆證據");
+      expect(updated.data.evidence).toHaveLength(1);
+      expect(updated.data.addedEvidence[0].kind).toBe("note");
+      expect(updated.data.addedEvidence[0].outputPath).toBeNull();
+      expect(updated.data.addedEvidence[0]).toEqual(updated.data.evidence[0]);
+    });
+  });
+
+  test("第二次再新增一筆時，addedEvidence 只有第二筆", async () => {
+    await withWorkTools(async (context) => {
+      const work = expectOk(await context.call("work_create", { title: "兩次新增" })).data.work;
+
+      expectOk(
+        await context.call("work_update", {
+          id: work.id,
+          expectedVersion: 1,
+          evidence: [{ kind: "note", summary: "第一筆", output: "a" }],
+        }),
+      );
+
+      const updated = expectOk(
+        await context.call("work_update", {
+          id: work.id,
+          expectedVersion: 2,
+          evidence: [{ kind: "link", summary: "第二筆", url: "https://example.com/b" }],
+        }),
+      );
+      expect(updated.data.work.version).toBe(3);
+      expect(updated.data.addedEvidence).toHaveLength(1);
+      expect(updated.data.addedEvidence[0].summary).toBe("第二筆");
+      expect(updated.data.evidence).toHaveLength(2);
+    });
+  });
+
+  test("完全沒有新增證據時，addedEvidence 是空陣列，evidence 仍是完整清單", async () => {
+    await withWorkTools(async (context) => {
+      const work = expectOk(await context.call("work_create", { title: "先放證據" })).data.work;
+
+      expectOk(
+        await context.call("work_update", {
+          id: work.id,
+          expectedVersion: 1,
+          evidence: [{ kind: "note", summary: "既有證據", output: "old" }],
+        }),
+      );
+
+      const updated = expectOk(
+        await context.call("work_update", {
+          id: work.id,
+          expectedVersion: 2,
+          title: "只改標題",
+        }),
+      );
+      expect(updated.data.work.version).toBe(3);
+      expect(updated.data.addedEvidence).toEqual([]);
+      expect(updated.data.evidence).toHaveLength(1);
+      expect(updated.data.evidence[0].summary).toBe("既有證據");
+    });
+  });
 });

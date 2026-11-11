@@ -1175,6 +1175,13 @@ function mapEvidence(item: EvidenceInput): MappedEvidence {
   }
 }
 
+interface InsertedEvidence {
+  /** 本次呼叫實際插入的一般證據；handoff 與 ruling 不會出現在這裡。 */
+  added: EvidenceView[];
+  /** 該工作目前的完整證據清單。 */
+  all: EvidenceView[];
+}
+
 function insertEvidence(
   db: Database,
   projectId: string,
@@ -1182,8 +1189,9 @@ function insertEvidence(
   workId: string,
   items: readonly EvidenceInput[],
   now: string,
-): EvidenceView[] {
+): InsertedEvidence {
   const mapped = items.map(mapEvidence);
+  const addedIds: string[] = [];
   for (const item of mapped) {
     const evidenceId = newId("evidence");
     db.query(
@@ -1216,8 +1224,11 @@ function insertEvidence(
       details: { evidenceId, kind: item.reportedKind },
       now,
     });
+    addedIds.push(evidenceId);
   }
-  return loadEvidence(db, projectId, workId);
+  const all = loadEvidence(db, projectId, workId);
+  const added = all.filter((view) => addedIds.includes(view.evidenceId));
+  return { added, all };
 }
 
 export function updateWork(
@@ -1444,7 +1455,7 @@ export function updateWork(
           });
         }
 
-        const evidence = insertEvidence(
+        const { added: addedEvidence, all: evidence } = insertEvidence(
           db,
           project.projectId,
           actor,
@@ -1467,7 +1478,7 @@ export function updateWork(
 
         const work = getWorkView(db, project.projectId, input.id);
         if (!work) throw workNotFound(input.id);
-        return ok("工作已更新。", { work, evidence });
+        return ok("工作已更新。", { work, evidence, addedEvidence });
       }),
   );
 }

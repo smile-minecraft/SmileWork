@@ -40,7 +40,8 @@ export function buildVerificationSummary(result: VerificationRunResult): string 
   const outcome = result.timedOut ? "逾時" : result.passed ? "通過" : "失敗";
   const exit = result.exitCode === null ? "無" : String(result.exitCode);
   const truncated = result.truncated ? "，輸出已截斷" : "";
-  return `verify_run ${result.runner} ${result.script}：${outcome}（exit ${exit}，${result.durationMs} ms${truncated}）`;
+  const hint = result.hint === null ? "" : "；工具鏈可能不一致，見 hint";
+  return `verify_run ${result.runner} ${result.script}：${outcome}（exit ${exit}，${result.durationMs} ms${truncated}）${hint}`;
 }
 
 export function buildVerificationOutput(result: VerificationRunResult): string {
@@ -57,6 +58,7 @@ export function buildVerificationOutput(result: VerificationRunResult): string {
     `truncated: ${result.truncated}`,
     `timeoutMs: ${result.timeoutMs}`,
     `maxOutputBytes: ${result.maxOutputBytes}`,
+    `hint: ${result.hint ?? "null"}`,
     "serverIssued: true",
     "",
     "## stdout",
@@ -107,6 +109,7 @@ export function writeVerificationEvidence(input: VerificationEvidenceInput): Ver
     timeoutMs: result.timeoutMs,
     maxOutputBytes: result.maxOutputBytes,
     passed: result.passed,
+    hint: result.hint,
     stdoutBytes: Buffer.byteLength(result.stdout, "utf8"),
     stderrBytes: Buffer.byteLength(result.stderr, "utf8"),
   });

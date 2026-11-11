@@ -3,8 +3,8 @@
  * 不經過 shell，環境變數由 environment.ts 的白名單決定。
  */
 
-import { accessSync, constants, statSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { accessSync, constants, realpathSync, statSync } from "node:fs";
+import { delimiter, isAbsolute, join } from "node:path";
 import { SmileworkError } from "../shared/errors.ts";
 import { runProcess } from "../shared/process-runner.ts";
 import { buildVerificationEnv } from "./environment.ts";
@@ -33,6 +33,13 @@ export const DEFAULT_MAX_OUTPUT_BYTES = 262_144;
 export const MAX_OUTPUT_BYTES = 1_048_576;
 const MIN_OUTPUT_BYTES = 512;
 
+/** macOS 的 /usr/bin/swift 只是依 xcode-select 轉送的系統 stub。 */
+export const MACOS_SWIFT_STUB_PATH = "/usr/bin/swift";
+/** 依 DEVELOPER_DIR／xcode-select 找實際 toolchain 的唯一入口。 */
+const MACOS_XCRUN_PATH = "/usr/bin/xcrun";
+/** xcrun --find 只查路徑，正常在數十毫秒內結束。 */
+const SWIFT_TOOLCHAIN_PROBE_TIMEOUT_MS = 5_000;
+
 export interface RunVerificationOptions {
   projectRoot: string;
   runner: string;
@@ -42,6 +49,8 @@ export interface RunVerificationOptions {
   timeoutMs?: number;
   maxOutputBytes?: number;
   env?: NodeJS.ProcessEnv;
+  /** Swift toolchain 探測的平台事實；省略時用 process.platform 與 /usr/bin/xcrun。 */
+  swiftToolchain?: Omit<SwiftToolchainOptions, "env">;
 }
 
 export interface VerificationRunResult {
@@ -59,6 +68,8 @@ export interface VerificationRunResult {
   stdout: string;
   stderr: string;
   passed: boolean;
+  /** 只有在 Swift 失敗且輸出指向工具鏈不一致時才有值。 */
+  hint: string | null;
 }
 
 function invalidArgsError(): SmileworkError {
@@ -102,18 +113,113 @@ function clampOutputBytes(value: number | undefined): number {
   return Math.min(MAX_OUTPUT_BYTES, Math.max(MIN_OUTPUT_BYTES, Math.floor(value)));
 }
 
+function isExecutableFile(path: string): boolean {
+  try {
+    if (!statSync(path).isFile()) return false;
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function findExecutableOnPath(executable: string, pathValue: string): string | null {
   for (const directory of pathValue.split(delimiter)) {
     const candidate = join(directory || ".", executable);
-    try {
-      if (!statSync(candidate).isFile()) continue;
-      accessSync(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      // 繼續找下一個 PATH 項目。
-    }
+    if (isExecutableFile(candidate)) return candidate;
   }
   return null;
+}
+
+function safeRealPath(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+/** 只有 macOS 上 PATH 解析到 Apple 系統 stub 時，才需要問 xcrun。 */
+export function shouldResolveSwiftWithXcrun(
+  platform: string,
+  executableRealPath: string,
+): boolean {
+  return platform === "darwin" && executableRealPath === MACOS_SWIFT_STUB_PATH;
+}
+
+export interface SwiftToolchainOptions {
+  /** 受限驗證環境；xcrun 也走同一份白名單。 */
+  env: Record<string, string>;
+  /** 測試注入點：預設 process.platform，用來模擬 macOS。 */
+  platform?: string;
+  /** 測試注入點：預設 /usr/bin/xcrun，用來指向假的 xcrun。 */
+  xcrunPath?: string;
+  /** 測試注入點：預設 realpathSync；/usr/bin/swift 是測試無法建立的固定路徑。 */
+  realPath?: (path: string) => string | null;
+}
+
+/** 執行 xcrun --find swift；失敗、逾時或候選不是可執行絕對路徑時回 null。 */
+async function findSwiftWithXcrun(
+  xcrunPath: string,
+  env: Record<string, string>,
+): Promise<string | null> {
+  let probe: Awaited<ReturnType<typeof runProcess>>;
+  try {
+    probe = await runProcess({
+      command: xcrunPath,
+      args: ["--find", "swift"],
+      env,
+      timeoutMs: SWIFT_TOOLCHAIN_PROBE_TIMEOUT_MS,
+      maxOutputBytes: MIN_OUTPUT_BYTES,
+    });
+  } catch {
+    return null;
+  }
+  if (probe.timedOut || probe.exitCode !== 0) return null;
+
+  const candidate = probe.stdout.split(/\r?\n/, 1)[0]?.trim() ?? "";
+  return isAbsolute(candidate) && isExecutableFile(candidate) ? candidate : null;
+}
+
+/**
+ * PATH 上的 swift 若是 Apple 系統 stub，改用 xcrun 依 DEVELOPER_DIR／xcode-select
+ * 解析實際 toolchain。任何一步失敗都退回原本的執行檔，不讓驗證因此失敗。
+ */
+export async function resolveSwiftToolchain(
+  executable: string,
+  options: SwiftToolchainOptions,
+): Promise<string> {
+  const real = (options.realPath ?? safeRealPath)(executable);
+  if (real === null) return executable;
+  if (!shouldResolveSwiftWithXcrun(options.platform ?? process.platform, real)) return executable;
+
+  const xcrunPath = options.xcrunPath ?? MACOS_XCRUN_PATH;
+  if (!isExecutableFile(xcrunPath)) return executable;
+
+  return (await findSwiftWithXcrun(xcrunPath, options.env)) ?? executable;
+}
+
+/**
+ * Swift 失敗訊息只有在 manifest 明確無效（Invalid manifest），或 PackageDescription
+ * 與 Undefined symbols 同時出現（manifest link 到錯的 PackageDescription）時，
+ * 才判定為工具鏈不一致；單獨出現其中一個也可能是一般的編譯或連結錯誤。
+ */
+export function swiftToolchainHint(
+  runner: VerifyRunner,
+  passed: boolean,
+  stdout: string,
+  stderr: string,
+): string | null {
+  if (runner !== "swift" || passed) return null;
+  const output = `${stdout}\n${stderr}`;
+  const invalidManifest = output.includes("Invalid manifest");
+  const manifestLinkMismatch =
+    output.includes("Undefined symbols") && output.includes("PackageDescription");
+  if (!invalidManifest && !manifestLinkMismatch) return null;
+  return [
+    "Swift 驗證失敗，輸出顯示 manifest 使用的 PackageDescription 與目前選到的 Swift 工具鏈不一致，通常是只裝了 Command Line Tools，或 Xcode 路徑不對。",
+    "先依序檢查 `xcode-select -p`、`swift --version`、`xcrun --find swift`；必要時執行 `xcode-select --install` 重裝 Command Line Tools，或把 DEVELOPER_DIR 指向完整 Xcode 的 Contents/Developer（例如 /Applications/Xcode.app/Contents/Developer）。",
+  ].join("");
 }
 
 export async function runVerification(options: RunVerificationOptions): Promise<VerificationRunResult> {
@@ -183,7 +289,10 @@ export async function runVerification(options: RunVerificationOptions): Promise<
         { runner, executable: name },
       );
     }
-    executable = found;
+    executable =
+      runner === "swift"
+        ? await resolveSwiftToolchain(found, { ...options.swiftToolchain, env })
+        : found;
   }
 
   const command = buildRunnerCommand(runner, script, args, executable);
@@ -209,6 +318,8 @@ export async function runVerification(options: RunVerificationOptions): Promise<
     );
   }
 
+  const passed = !processed.timedOut && processed.exitCode === 0;
+
   return {
     runner,
     script,
@@ -223,6 +334,7 @@ export async function runVerification(options: RunVerificationOptions): Promise<
     maxOutputBytes,
     stdout: processed.stdout,
     stderr: processed.stderr,
-    passed: !processed.timedOut && processed.exitCode === 0,
+    passed,
+    hint: swiftToolchainHint(runner, passed, processed.stdout, processed.stderr),
   };
 }

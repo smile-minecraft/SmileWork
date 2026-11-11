@@ -25,6 +25,7 @@ import { loadWorkContinuity } from "./continuity.ts";
 import {
   evaluateCompletionGates,
   evaluateReviewGates,
+  matchAcceptanceResults,
   primaryIssue,
   WORK_ERROR_CODES,
   type DependencyReference,
@@ -405,25 +406,16 @@ function completeWorkInTransaction(
     dependencies: loadDependencies(db, work.workId),
   });
   const primary = primaryIssue(issues);
-  if (primary) {
-    if (primary.code === WORK_ERROR_CODES.invalidTransition && work.status !== "review") {
-      return gateFailure(work, issues, {
-        ...primary,
-        nextAction: `先用 work_review（id: ${work.workId}, expectedVersion: ${work.version}, verdict: approve 或 reject）把工作推進到 review，再用 work_complete（expectedVersion: ${work.version + 1}）結案。`,
-      });
-    }
-    return gateFailure(work, issues, primary);
-  }
-
-  const byCriterion = new Map<string, AcceptanceResultItem>();
-  for (const item of input.acceptance) byCriterion.set(item.criterion.trim(), item);
+  if (primary) return gateFailure(work, issues, primary);
 
   const completedAt = nowIso();
-  const items: AcceptanceResultItem[] = work.acceptance.map((criterion) => {
-    const item = byCriterion.get(criterion.trim());
-    if (!item) throw new Error(`驗收條件 ${criterion} 在閘門通過後找不到結果。`);
-    return { criterion, met: item.met, evidenceIds: unique(item.evidenceIds) };
-  });
+  const items: AcceptanceResultItem[] = matchAcceptanceResults(work.acceptance, input.acceptance).map(
+    ({ criterion, result }) => ({
+      criterion,
+      met: result.met,
+      evidenceIds: unique(result.evidenceIds),
+    }),
+  );
   const acceptanceResults: AcceptanceResults | null =
     items.length === 0
       ? null

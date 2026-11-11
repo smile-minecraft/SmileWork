@@ -267,6 +267,7 @@ describe("verify_run 端到端", () => {
       expect(response.ok).toBe(true);
       expect(response.data).toMatchObject({ runner: "cargo", exitCode: 7, passed: false });
       expect(response.data?.command).toEqual([cargoPath, "test", "tests/unit"]);
+      expect(response.data?.hint).toBeNull();
       expect(String(response.data?.stderr)).toContain("failure detail");
 
       const evidence = response.data?.evidence as { evidenceId: string; summary: string };
@@ -280,7 +281,7 @@ describe("verify_run 端到端", () => {
 
   test("swift 輸出超過上限時截斷並標記", async () => {
     await withVerifyFixture(async (fixture) => {
-      fixture.install("swift", [
+      const swiftPath = fixture.install("swift", [
         'printf "SWIFT_START\\n"',
         "awk 'BEGIN { for (i = 0; i < 30000; i++) print \"0123456789\" }'",
       ].join("\n"));
@@ -291,6 +292,7 @@ describe("verify_run 端到端", () => {
       });
 
       expect(response.ok).toBe(true);
+      expect(response.data?.command).toEqual([swiftPath, "test"]);
       expect(response.data?.truncated).toBe(true);
       expect(String(response.data?.stdout).startsWith("SWIFT_START")).toBe(true);
       expect(Buffer.byteLength(String(response.data?.stdout), "utf8")).toBeLessThanOrEqual(
@@ -304,6 +306,53 @@ describe("verify_run 端到端", () => {
       const output = evidenceFile(row);
       expect(output).toContain("truncated: true");
       expect(Buffer.byteLength(output, "utf8")).toBeLessThan(DEFAULT_MAX_OUTPUT_BYTES + 10_000);
+    });
+  });
+
+  test("swift 因工具鏈不一致失敗時回傳 hint 並寫進證據", async () => {
+    await withVerifyFixture(async (fixture) => {
+      fixture.install("swift", [
+        'printf "error: demo: Invalid manifest (compiled with swiftc)\\n" >&2',
+        'printf "Undefined symbols for architecture arm64:\\n" >&2',
+        'printf "  PackageDescription.Package.__allocating_init\\n" >&2',
+        "exit 1",
+      ].join("\n"));
+
+      const response = await callVerify(fixture, {
+        workId: fixture.workId,
+        runner: "swift",
+      });
+
+      expect(response.ok).toBe(true);
+      expect(response.data).toMatchObject({ runner: "swift", exitCode: 1, passed: false });
+      const hint = String(response.data?.hint);
+      expect(hint).toContain("工具鏈");
+      expect(hint).toContain("xcode-select -p");
+      expect(hint).toContain("swift --version");
+      expect(hint).toContain("xcrun --find swift");
+      expect(hint).toContain("DEVELOPER_DIR");
+
+      const evidence = response.data?.evidence as { evidenceId: string; summary: string };
+      expect(evidence.summary).toContain("工具鏈可能不一致");
+      const row = readEvidenceRow(fixture.db, evidence.evidenceId);
+      const details = JSON.parse(row.details ?? "{}") as Record<string, unknown>;
+      expect(details.hint).toBe(hint);
+      expect(evidenceFile(row)).toContain(hint);
+    });
+  });
+
+  test("swift 通過時不產生 hint", async () => {
+    await withVerifyFixture(async (fixture) => {
+      fixture.install("swift", 'printf "PackageDescription\\n"');
+
+      const response = await callVerify(fixture, {
+        workId: fixture.workId,
+        runner: "swift",
+      });
+
+      expect(response.ok).toBe(true);
+      expect(response.data?.passed).toBe(true);
+      expect(response.data?.hint).toBeNull();
     });
   });
 
