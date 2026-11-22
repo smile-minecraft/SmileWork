@@ -349,7 +349,7 @@ function loadEvidence(db: Database, projectId: string, workId: string): Evidence
     .query<EvidenceRow, [string, string]>(
       `SELECT * FROM evidence
        WHERE project_id = ? AND work_id = ?
-       ORDER BY created_at, evidence_id`,
+       ORDER BY created_at, rowid`,
     )
     .all(projectId, workId)
     .map(toEvidenceView);
