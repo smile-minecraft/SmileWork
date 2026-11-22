@@ -1,5 +1,37 @@
 # 變更紀錄
 
+## 0.3.0 - 2026-11-23
+
+這個版本把送審與結案的證據閘門收緊，讓改動可追查，並降低多代理同時操作時的資料庫爭用。
+
+### 新增
+
+- MCP stdio 的 stdout guard：`startMcpServer` 把 `console.log/info/debug/warn/dir/trace` 導到 stderr，避免散落輸出破壞 JSON-RPC framing。
+- `verify_run` 記錄工作區指紋：`gitHead`、`workingTreeClean`，以及涵蓋 HEAD、status、staged／unstaged diff 與 untracked 檔案的 `treeFingerprint`；驗證期間工作區被改動時標為 `treeChangedDuringRun`。
+- 伺服器端 diff 衛生與 `scopePaths` 閘門：掃描新增行的規則繞過／跳過測試寫法（`@ts-ignore`、`@ts-expect-error`、`@ts-nocheck`、`eslint-disable`、`biome-ignore`、coverage ignore、`test/it/describe.skip|todo`、`@Disabled`、`@pytest.mark.skip`、`#[ignore]`、`#[allow(...)]`、`# noqa`、`# type: ignore`）與範圍外改動；必要的例外可用 ruling 寫出規則名稱、`diff-hygiene` 或 `scope-override`。
+- `verify_run` 的專案 `script` runner：只執行正規、可執行、非 symlink 的 `scripts/{verify,check,test}.sh`，不接受額外參數，也不經過 shell。
+- 多程序 black-box stdio E2E 測試（3 個並行 `smilework mcp` 子程序）與統一的 `scripts/verify.sh`（`bun run verify`）。
+
+### 變更
+
+- 每個伺服器共用一條 lazy SQLite 連線，`registerProject()` 加入 60 秒寫入鎖 fast path，`gitLocationFor()` 加入 5 秒 TTL cache（`gitHeadFor()` 不快取），降低多代理同時寫入的爭用。
+- 送審與結案閘門：`work_update` 的 `in_progress → review` 是中高風險工作的送審步驟，需要目前工作區上成功的伺服器證據，並通過 diff 衛生與 `scopePaths` 檢查；同一呼叫降低風險不能繞過。`work_complete` 對中高風險工作套用相同的新鮮證據與 diff 衛生檢查（低風險維持輕量，沒有 `treeFingerprint` 的舊證據仍相容）。
+- 認領保護：`open → in_progress` 把 `owner` 設為呼叫者；更新他人 `in_progress` 工作會回 `WORK_ALREADY_CLAIMED`，除非帶 `takeover: true` 或 `handoff` 證據。
+- 防冒名審查：`work_review` 只要呼叫方就是 owner，便以 `REVIEWER_IS_OWNER` 拒絕 `approve`，不看 `reviewer` 參數。
+- 精簡工具回應：`verify_run` 的完整輸出留在 `outputPath`，回應只帶 2 KB 的 `stdout`／`stderr` 尾端、`outputTail`、`errorHighlights` 與 `responseTruncated`；`work_update` 把回應中的證據 `output` 截到 500 字並標 `outputTruncated`，`work_get` 仍回傳全文。
+- 精簡 `worker` profile 的工具描述，序列化後的 `tools/list` 維持在 2,886 `o200k_base` token（3,000 token 預算內）。
+
+### 修正
+
+- `src/work/crud.ts` 的 `loadEvidence` 改按 `created_at, rowid` 排序，同一次呼叫新增的多筆證據會維持寫入順序。
+- `verify_run` 的證據寫入改在 `withImmediateTransaction` 內執行。
+
+### 已知限制
+
+- `work_review` 仍可直接把 `in_progress` 工作改成 `review`；完整的證據、diff 衛生與範圍檢查由 `work_complete` 落實。
+- 測試若留下未被忽略的 untracked 檔案，需要再跑一次乾淨的驗證，工作區指紋才會相符。
+- `script` runner 會檢查正規檔案、非 symlink、可執行與路徑範圍，但不會阻止代理修改 `scripts/verify.sh` 本身；改動會出現在 diff 與 scope 檢查。
+
 ## 0.2.1 - 2026-11-11
 
 這個版本讓非高風險工作可以直接結案，並改善驗收比對與 Swift 驗證的診斷。
