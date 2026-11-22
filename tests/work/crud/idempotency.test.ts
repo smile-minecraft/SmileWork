@@ -126,7 +126,7 @@ describe("冪等鍵快取的回應損壞", () => {
   test("work_complete 的回放缺 summary/data 時回 INTERNAL_ERROR，不再假成功", async () => {
     await withWorkTools(async (context) => {
       const work = expectOk(
-        await context.call("work_create", { title: "結案快取回放損壞" }),
+        await context.call("work_create", { title: "結案快取回放損壞", risk: "low" }),
       ).data.work;
       const db = context.openDb();
       try {

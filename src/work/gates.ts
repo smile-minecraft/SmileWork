@@ -1,9 +1,18 @@
 import type {
   AcceptanceResultItem,
   ReviewVerdict,
+  RiskLevel,
   WorkItem,
   WorkStatus,
 } from "../domain/work.ts";
+import {
+  DIFF_HYGIENE_EXEMPTION,
+  evaluateDiffHygiene,
+  SCOPE_OVERRIDE_EXEMPTION,
+  type RulingText,
+  type WorkspaceChanges,
+} from "../verify/diff-hygiene.ts";
+import type { GitWorkspaceState } from "../verify/git-state.ts";
 
 /** 結案與審查對外回報的錯誤碼；字串值直接進工具失敗外框。 */
 export const WORK_ERROR_CODES = {
@@ -16,6 +25,9 @@ export const WORK_ERROR_CODES = {
   reviewerIsOwner: "REVIEWER_IS_OWNER",
   serverEvidenceRequired: "SERVER_EVIDENCE_REQUIRED",
   serverEvidenceFailed: "SERVER_EVIDENCE_FAILED",
+  serverEvidenceStale: "SERVER_EVIDENCE_STALE",
+  diffHygieneFailed: "DIFF_HYGIENE_FAILED",
+  scopeViolation: "SCOPE_VIOLATION",
   dependencyNotDone: "DEPENDENCY_NOT_DONE",
   invalidTransition: "INVALID_TRANSITION",
   idempotencyConflict: "IDEMPOTENCY_CONFLICT",
@@ -37,6 +49,22 @@ export interface EvidenceReference {
   exitCode: number | null;
   /** verify_run 逾時時為 true；舊資料或沒有 details 時為 false。 */
   timedOut: boolean;
+  /**
+   * 執行 verify_run 時的工作區指紋。undefined 表示舊證據沒有記錄（視為仍然有效）；
+   * null 表示記錄時無法取得指紋，在 git repo 內不算新鮮。
+   */
+  treeFingerprint?: string | null;
+  summary?: string;
+  outputPath?: string | null;
+  createdAt?: string;
+}
+
+/** 閘門需要的工作區事實：git 指紋與自 baseCommit 以來的改動。 */
+export interface WorkspaceSnapshot {
+  git: GitWorkspaceState;
+  changes: WorkspaceChanges | null;
+  /** 在 git repo 內但無法檢查改動時的原因；閘門會 fail closed。 */
+  changesError: string | null;
 }
 
 export interface DependencyReference {
@@ -50,12 +78,17 @@ export interface CompletionGateInput {
   acceptance: readonly AcceptanceResultItem[];
   evidence: readonly EvidenceReference[];
   dependencies: readonly DependencyReference[];
+  /** 省略時視為不在 git repo，只檢查不需要工作區的閘門。 */
+  workspace?: WorkspaceSnapshot | null;
+  rulings?: readonly RulingText[];
 }
 
 export interface ReviewGateInput {
   work: WorkItem;
   verdict: ReviewVerdict;
   reviewer: string;
+  /** 呼叫工具的代理名稱；"unknown" 表示沒有宣告身分。 */
+  actorName?: string;
 }
 
 /** 多個閘門同時失敗時，回報最根本的那一個；其餘放在 blockedBy。 */
@@ -69,6 +102,9 @@ const CODE_PRIORITY: Record<string, number> = {
   REVIEW_STALE: 5,
   SERVER_EVIDENCE_REQUIRED: 6,
   SERVER_EVIDENCE_FAILED: 6,
+  SERVER_EVIDENCE_STALE: 6,
+  DIFF_HYGIENE_FAILED: 6,
+  SCOPE_VIOLATION: 6,
   WORK_NOT_FOUND: 7,
   VERSION_CONFLICT: 7,
   IDEMPOTENCY_CONFLICT: 7,
@@ -400,10 +436,162 @@ function dependencyIssue(dependencies: readonly DependencyReference[]): GateIssu
   };
 }
 
-/** 沒有結束碼的舊證據視為可用；逾時或非 0 結束碼則視為失敗。 */
-function isSuccessfulServerEvidence(item: EvidenceReference): boolean {
+/** 中、高風險工作需要伺服器證據；低風險（文件等非程式工作）維持輕量。 */
+export function requiresServerVerification(risk: RiskLevel | null): boolean {
+  return risk === "medium" || risk === "high";
+}
+
+/**
+ * 成功的伺服器證據：未逾時且 exitCode 為 0。allowLegacyExitCode 時，沒有結束碼的
+ * 舊證據也視為成功（結案的向下相容）；送審一律要求 exitCode 0。
+ */
+function isSuccessfulServerEvidence(item: EvidenceReference, allowLegacyExitCode: boolean): boolean {
   if (item.timedOut) return false;
-  return item.exitCode === null || item.exitCode === 0;
+  if (item.exitCode === 0) return true;
+  return allowLegacyExitCode && item.exitCode === null;
+}
+
+function isFreshEvidence(item: EvidenceReference, git: GitWorkspaceState | null): boolean {
+  if (item.treeFingerprint === undefined) return true;
+  if (!git || !git.isGitRepo) return true;
+  return git.treeFingerprint !== null && item.treeFingerprint === git.treeFingerprint;
+}
+
+function evidenceBrief(item: EvidenceReference): Record<string, unknown> {
+  return {
+    evidenceId: item.evidenceId,
+    summary: item.summary ?? null,
+    exitCode: item.exitCode,
+    timedOut: item.timedOut,
+    outputPath: item.outputPath ?? null,
+  };
+}
+
+export interface ServerEvidenceGateOptions {
+  /** 用在訊息裡的動作，例如「結案」或「送審」。 */
+  action: string;
+  allowLegacyExitCode: boolean;
+}
+
+/** 伺服器證據閘門：必須存在、至少一筆成功，而且是在目前的工作區上跑出來的。 */
+export function serverEvidenceIssues(
+  risk: RiskLevel | null,
+  evidence: readonly EvidenceReference[],
+  git: GitWorkspaceState | null,
+  options: ServerEvidenceGateOptions,
+): GateIssue[] {
+  if (!requiresServerVerification(risk)) return [];
+
+  const serverEvidence = evidence.filter((item) => item.serverIssued);
+  if (serverEvidence.length === 0) {
+    return [
+      {
+        code: WORK_ERROR_CODES.serverEvidenceRequired,
+        message: `${risk === "high" ? "高" : "中"}風險工作${options.action}前需要至少一個伺服器簽發的證據。`,
+        nextAction: `先用 verify_run 取得 serverIssued 證據，再重新${options.action}。`,
+        data: { risk },
+      },
+    ];
+  }
+
+  const passing = serverEvidence.filter((item) =>
+    isSuccessfulServerEvidence(item, options.allowLegacyExitCode),
+  );
+  if (passing.length === 0) {
+    const latest = serverEvidence[serverEvidence.length - 1]!;
+    return [
+      {
+        code: WORK_ERROR_CODES.serverEvidenceFailed,
+        message: `伺服器證據存在，但全部失敗或逾時，不能支撐${options.action}。`,
+        nextAction: `讀 latestFailed.outputPath 找出失敗原因，修正後重新執行 verify_run，取得 exitCode 0 且未逾時的證據再${options.action}。`,
+        data: {
+          risk,
+          latestFailed: evidenceBrief(latest),
+          failedEvidenceIds: serverEvidence.map((item) => item.evidenceId),
+        },
+      },
+    ];
+  }
+
+  if (!passing.some((item) => isFreshEvidence(item, git))) {
+    const latest = passing[passing.length - 1]!;
+    return [
+      {
+        code: WORK_ERROR_CODES.serverEvidenceStale,
+        message:
+          git?.treeFingerprint === null
+            ? "無法取得目前工作區的 git 指紋，不能確認伺服器證據仍然有效。"
+            : `成功的伺服器證據之後工作區已經變動，證據不再對應目前的程式碼，不能${options.action}。`,
+        nextAction: `在目前的工作區重新執行 verify_run，取得新的成功證據後再${options.action}。`,
+        data: {
+          risk,
+          currentTreeFingerprint: git?.treeFingerprint ?? null,
+          currentGitHead: git?.gitHead ?? null,
+          latestPassing: {
+            ...evidenceBrief(latest),
+            treeFingerprint: latest.treeFingerprint ?? null,
+          },
+        },
+      },
+    ];
+  }
+
+  return [];
+}
+
+const MAX_REPORTED_FINDINGS = 20;
+const MAX_REPORTED_PATHS = 50;
+
+/** diff 衛生與 scopePaths 閘門；不是 git repo 時不檢查。 */
+export function diffHygieneIssues(
+  workspace: WorkspaceSnapshot | null | undefined,
+  scopePaths: readonly string[],
+  rulings: readonly RulingText[],
+): GateIssue[] {
+  if (!workspace || !workspace.git.isGitRepo) return [];
+  if (workspace.changes === null) {
+    return [
+      {
+        code: WORK_ERROR_CODES.diffHygieneFailed,
+        message: `無法檢查工作區的改動：${workspace.changesError ?? "git 指令失敗"}。`,
+        nextAction: "確認專案是可讀取的 git repo（git status、git diff 可以正常執行）後再試一次。",
+        data: { reason: workspace.changesError },
+      },
+    ];
+  }
+
+  const result = evaluateDiffHygiene(workspace.changes, { scopePaths, rulings });
+  const issues: GateIssue[] = [];
+  if (result.findings.length > 0) {
+    const rules = [...new Set(result.findings.map((finding) => finding.rule))];
+    issues.push({
+      code: WORK_ERROR_CODES.diffHygieneFailed,
+      message: `改動新增了 ${result.findings.length} 處繞過規則或跳過測試的寫法（${rules.join("、")}）。`,
+      nextAction: `移除這些寫法並修正根因；確實必要的例外，用 work_update 的 ruling 證據記錄理由並在 decision 寫出規則名稱（例如 ${rules[0]}）或 ${DIFF_HYGIENE_EXEMPTION}。`,
+      data: {
+        rules,
+        findings: result.findings.slice(0, MAX_REPORTED_FINDINGS),
+        findingsTotal: result.findings.length,
+        baseRef: workspace.changes.baseRef,
+        baseSource: workspace.changes.baseSource,
+      },
+    });
+  }
+  if (result.scopeViolations.length > 0) {
+    issues.push({
+      code: WORK_ERROR_CODES.scopeViolation,
+      message: `有 ${result.scopeViolations.length} 個改動檔案不在工作的 scopePaths 內。`,
+      nextAction: `還原範圍外的改動，或用 work_update 擴充 scopePaths；確實需要跨範圍時，用 ruling 證據記錄理由並寫出 ${SCOPE_OVERRIDE_EXEMPTION}。`,
+      data: {
+        scopeViolations: result.scopeViolations.slice(0, MAX_REPORTED_PATHS),
+        scopeViolationsTotal: result.scopeViolations.length,
+        scopePaths: [...scopePaths],
+        baseRef: workspace.changes.baseRef,
+        baseSource: workspace.changes.baseSource,
+      },
+    });
+  }
+  return issues;
 }
 
 /** 低風險免審查不能繞過目前在這個版本上仍然有效的 reject。 */
@@ -427,10 +615,7 @@ function rejectedReviewIssue(work: WorkItem): GateIssue | null {
   };
 }
 
-function highRiskReviewIssues(
-  work: WorkItem,
-  evidence: readonly EvidenceReference[],
-): GateIssue[] {
+function highRiskReviewIssues(work: WorkItem): GateIssue[] {
   if (work.risk !== "high") return [];
 
   const issues: GateIssue[] = [];
@@ -466,34 +651,10 @@ function highRiskReviewIssues(
     });
   }
 
-  const serverEvidence = evidence.filter((item) => item.serverIssued);
-  if (serverEvidence.length === 0) {
-    issues.push({
-      code: WORK_ERROR_CODES.serverEvidenceRequired,
-      message: "高風險工作需要至少一個伺服器簽發的證據。",
-      nextAction: "先用 verify_run 取得 serverIssued 證據，再重新結案。",
-      data: { risk: work.risk },
-    });
-  } else if (!serverEvidence.some(isSuccessfulServerEvidence)) {
-    issues.push({
-      code: WORK_ERROR_CODES.serverEvidenceFailed,
-      message: "高風險工作的伺服器證據存在，但全部失敗或逾時，不能支撐結案。",
-      nextAction: "重新執行 verify_run，取得成功（exitCode 0 且未逾時）的伺服器證據後再結案。",
-      data: {
-        risk: work.risk,
-        evidence: serverEvidence.map((item) => ({
-          evidenceId: item.evidenceId,
-          exitCode: item.exitCode,
-          timedOut: item.timedOut,
-        })),
-      },
-    });
-  }
-
   return issues;
 }
 
-/** 結案閘門：狀態、驗收、證據、依賴、高風險審查與伺服器證據。 */
+/** 結案閘門：狀態、驗收、證據、依賴、高風險審查，以及中高風險的伺服器證據與 diff 衛生。 */
 export function evaluateCompletionGates(input: CompletionGateInput): GateIssue[] {
   const issues: GateIssue[] = [];
   const transition = transitionIssue(input.work);
@@ -512,7 +673,17 @@ export function evaluateCompletionGates(input: CompletionGateInput): GateIssue[]
   const rejected = rejectedReviewIssue(input.work);
   if (rejected) issues.push(rejected);
 
-  issues.push(...highRiskReviewIssues(input.work, input.evidence));
+  issues.push(...highRiskReviewIssues(input.work));
+
+  if (requiresServerVerification(input.work.risk)) {
+    issues.push(
+      ...serverEvidenceIssues(input.work.risk, input.evidence, input.workspace?.git ?? null, {
+        action: "結案",
+        allowLegacyExitCode: true,
+      }),
+    );
+    issues.push(...diffHygieneIssues(input.workspace, input.work.scopePaths, input.rulings ?? []));
+  }
   return issues;
 }
 
@@ -547,12 +718,17 @@ export function evaluateReviewGates(input: ReviewGateInput): GateIssue[] {
   const transition = reviewTransitionIssue(input.work);
   if (transition) issues.push(transition);
 
-  if (input.verdict === "approve" && input.reviewer.trim() === input.work.owner.trim()) {
+  const owner = input.work.owner.trim();
+  const actorName = input.actorName?.trim() ?? "unknown";
+  const actorIsOwner = actorName !== "unknown" && actorName === owner;
+  if (input.verdict === "approve" && (input.reviewer.trim() === owner || actorIsOwner)) {
     issues.push({
       code: WORK_ERROR_CODES.reviewerIsOwner,
-      message: "owner 不能 approve 自己的工作。",
-      nextAction: "請非 owner 的審查者記錄 approve；owner 只能記錄 concerns 或 reject。",
-      data: { owner: input.work.owner, reviewer: input.reviewer },
+      message: actorIsOwner
+        ? "呼叫者就是 owner，不能 approve 自己的工作（reviewer 欄位不能代替真正的審查者身分）。"
+        : "owner 不能 approve 自己的工作。",
+      nextAction: "請非 owner 的審查者以自己的身分記錄 approve；owner 只能記錄 concerns 或 reject。",
+      data: { owner: input.work.owner, reviewer: input.reviewer, actor: actorName },
     });
   }
 

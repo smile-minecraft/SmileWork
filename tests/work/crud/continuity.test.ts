@@ -128,7 +128,7 @@ describe("交接與決定紀錄", () => {
   test("審查與結案的回傳都帶最新交接與 rulings", async () => {
     await withWorkTools(async (context) => {
       const work = expectOk(
-        await context.call("work_create", { title: "審查看得到" }),
+        await context.call("work_create", { title: "審查看得到", risk: "low" }),
       ).data.work;
       const moved = expectOk(
         await context.call("work_update", {
@@ -156,11 +156,10 @@ describe("交接與決定紀錄", () => {
       ).data.work;
 
       const review = expectOk(
-        await context.call("work_review", {
+        await context.callAs("reviewer", "work_review", {
           id: work.id,
           expectedVersion: moved.version,
           verdict: "approve",
-          reviewer: "reviewer",
           note: "看過",
         }),
       ).data;

@@ -31,7 +31,13 @@ describe("work_complete 的狀態規則", () => {
           risk,
           acceptance: ["項目"],
         });
-        const evidenceId = insertEvidence(db, projectId, workId);
+        // 中風險需要成功的伺服器證據；低風險與未分級維持人工證據即可。
+        const evidenceId = insertEvidence(
+          db,
+          projectId,
+          workId,
+          risk === "medium" ? { serverIssued: true, exitCode: 0 } : {},
+        );
 
         const result = await callComplete(context, {
           id: workId,
@@ -44,6 +50,43 @@ describe("work_complete 的狀態規則", () => {
         expect(result.data).toMatchObject({ status: "done", resolution: "completed", version: 2 });
         expect(readWork(db, workId)?.status).toBe("done");
       }
+    });
+  });
+
+  test("中風險工作缺少伺服器證據時不能結案，只有失敗的證據時回 SERVER_EVIDENCE_FAILED", async () => {
+    await withLifecycle(async ({ db, projectId, context }) => {
+      const workId = insertWork(db, projectId, {
+        status: "in_progress",
+        risk: "medium",
+        acceptance: ["項目"],
+      });
+      const human = insertEvidence(db, projectId, workId);
+      const input = {
+        id: workId,
+        expectedVersion: 1,
+        acceptance: [{ criterion: "項目", met: true, evidenceIds: [human] }],
+      };
+
+      const missing = await callComplete(context, input);
+      expect(missing.ok).toBe(false);
+      if (missing.ok) return;
+      expect(missing.code).toBe("SERVER_EVIDENCE_REQUIRED");
+
+      const failed = insertEvidence(db, projectId, workId, {
+        serverIssued: true,
+        exitCode: 1,
+        summary: "verify_run bun test：失敗",
+      });
+      const rejected = await callComplete(context, input);
+      expect(rejected.ok).toBe(false);
+      if (rejected.ok) return;
+      expect(rejected.code).toBe("SERVER_EVIDENCE_FAILED");
+      expect(rejected.data.latestFailed).toMatchObject({
+        evidenceId: failed,
+        exitCode: 1,
+        summary: "verify_run bun test：失敗",
+      });
+      expect(readWork(db, workId)?.status).toBe("in_progress");
     });
   });
 

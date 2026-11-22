@@ -36,6 +36,14 @@ import {
   type WorkHandoff,
   type WorkRuling,
 } from "./continuity.ts";
+import {
+  diffHygieneIssues,
+  primaryIssue,
+  serverEvidenceIssues,
+  type GateIssue,
+  type WorkspaceSnapshot,
+} from "./gates.ts";
+import { captureWorkspaceSnapshot, loadEvidenceReferences } from "./lifecycle.ts";
 
 /** 工作工具對外承諾的錯誤碼；其他工具的錯誤碼留在各自的模組。 */
 export const WORK_ERROR_CODES = {
@@ -46,7 +54,11 @@ export const WORK_ERROR_CODES = {
   dependencyCycle: "DEPENDENCY_CYCLE",
   invalidTransition: "INVALID_TRANSITION",
   idempotencyConflict: "IDEMPOTENCY_CONFLICT",
+  workAlreadyClaimed: "WORK_ALREADY_CLAIMED",
 } as const;
+
+/** work_update 回應中每筆證據 output 的字元上限；完整內容留在資料庫，work_get 會回傳。 */
+export const UPDATE_RESPONSE_OUTPUT_LIMIT = 500;
 
 type SqlValue = string | number | boolean | null;
 
@@ -1075,7 +1087,70 @@ export interface UpdateWorkInput {
   addDependsOn?: string[];
   removeDependsOn?: string[];
   evidence?: EvidenceInput[];
+  /** 接手別人已認領（in_progress）的工作；不帶時只有 owner 或附 handoff 才能更新。 */
+  takeover?: boolean;
   idempotencyKey?: string;
+}
+
+/** 回應用的精簡證據：output 超過上限時截斷並標記 outputTruncated。 */
+export type CompactEvidenceView = EvidenceView & { outputTruncated?: true };
+
+export function compactEvidenceView(view: EvidenceView): CompactEvidenceView {
+  if (view.output === null || view.output.length <= UPDATE_RESPONSE_OUTPUT_LIMIT) return view;
+  return {
+    ...view,
+    output: view.output.slice(0, UPDATE_RESPONSE_OUTPUT_LIMIT),
+    outputTruncated: true,
+  };
+}
+
+const RISK_RANK: Record<RiskLevel, number> = { low: 0, medium: 1, high: 2 };
+
+/** 送審時同一次呼叫降低風險不能繞過閘門：取原本與新值中較嚴格的一個。 */
+function stricterRisk(before: RiskLevel | null, after: RiskLevel | null): RiskLevel | null {
+  if (before === null) return after;
+  if (after === null) return before;
+  return RISK_RANK[after] >= RISK_RANK[before] ? after : before;
+}
+
+function isUnclaimedOwner(owner: string): boolean {
+  const trimmed = owner.trim();
+  return trimmed === "" || trimmed === "unknown";
+}
+
+function workAlreadyClaimed(current: WorkView): SmileworkError {
+  return new SmileworkError(
+    WORK_ERROR_CODES.workAlreadyClaimed,
+    `工作 ${current.id} 已由 ${current.owner} 認領並在進行中。`,
+    `由 owner（${current.owner}）繼續更新；確定要接手時帶 takeover: true，或附上 kind: handoff 的交接證據。`,
+    { workId: current.id, currentOwner: current.owner, currentVersion: current.version },
+  );
+}
+
+function gateError(current: WorkView, issues: readonly GateIssue[], primary: GateIssue): SmileworkError {
+  return new SmileworkError(primary.code, primary.message, primary.nextAction, {
+    ...primary.data,
+    workId: current.id,
+    currentVersion: current.version,
+    blockedBy: issues.map((issue) => issue.code),
+  });
+}
+
+/**
+ * 送審（in_progress → review）的工作區快照在交易外擷取，避免 git 指令持有寫入鎖。
+ * baseCommit 建立後不會變；工作在這段期間被改動時，交易內的版本檢查會擋下。
+ */
+function prepareReviewSubmission(
+  db: Database,
+  project: ProjectContext,
+  input: UpdateWorkInput,
+): WorkspaceSnapshot | null {
+  if (input.status !== "review" || db.inTransaction) return null;
+  const current = getWorkView(db, project.projectId, input.id);
+  if (!current || current.status !== "in_progress" || current.version !== input.expectedVersion) {
+    return null;
+  }
+  return captureWorkspaceSnapshot(project.worktreePath, current.baseCommit);
 }
 
 interface MappedEvidence {
@@ -1237,6 +1312,7 @@ export function updateWork(
   actor: Actor,
   input: UpdateWorkInput,
 ): ToolResult {
+  const prepared = prepareReviewSubmission(db, project, input);
   return runIdempotent(
     db,
     {
@@ -1253,19 +1329,45 @@ export function updateWork(
           throw versionConflict(current, input.expectedVersion);
         }
 
+        const evidenceItems = input.evidence ?? [];
+        const continuityItems = evidenceItems.filter(
+          (item) => item.kind === "handoff" || item.kind === "ruling",
+        );
+        const regularEvidenceItems = evidenceItems.filter(
+          (item) => item.kind !== "handoff" && item.kind !== "ruling",
+        );
+
+        const declaredActor = actor.name !== "unknown";
+        if (
+          current.status === "in_progress" &&
+          declaredActor &&
+          current.owner !== actor.name &&
+          !isUnclaimedOwner(current.owner) &&
+          input.takeover !== true &&
+          !continuityItems.some((item) => item.kind === "handoff")
+        ) {
+          throw workAlreadyClaimed(current);
+        }
+
         let status = current.status;
         let resolution = current.resolution;
         if (input.status !== undefined) {
-          if (input.status === "review" || input.status === "done") {
-            const nextAction =
-              input.status === "review"
-                ? `改用 work_review（id: ${input.id}, expectedVersion: ${current.version}, verdict: approve 或 reject）。`
-                : `work_update 不能直接設定 done；先呼叫 work_review（id: ${input.id}, expectedVersion: ${current.version}），再用 work_complete（expectedVersion: ${current.version + 1}）。`;
+          if (input.status === "done") {
             throw invalidTransition(
               current.status,
               input.status,
-              `工作狀態 ${input.status} 只能由審查或結案工具設定。`,
-              nextAction,
+              "工作狀態 done 只能由結案工具設定。",
+              `work_update 不能直接設定 done；送審用 work_update（status: review），審查用 work_review（id: ${input.id}），再用 work_complete 結案。`,
+            );
+          }
+          if (input.status === "review" && current.status !== "in_progress") {
+            throw invalidTransition(
+              current.status,
+              input.status,
+              `只有 in_progress 的工作能用 work_update 送審，目前是 ${current.status}。`,
+              current.status === "review"
+                ? `工作已在審查中；請審查者用 work_review（id: ${input.id}, expectedVersion: ${current.version}）記錄結論。`
+                : `先用 work_update 把工作轉到 in_progress，完成並用 verify_run 驗證後再送審；或由審查者用 work_review 記錄結論。`,
             );
           }
           if (input.status !== current.status) {
@@ -1304,7 +1406,16 @@ export function updateWork(
             : normalizeStrings(input.acceptance, "acceptance");
         const labels =
           input.labels === undefined ? current.labels : normalizeStrings(input.labels, "labels");
-        const owner = input.owner === undefined ? current.owner : normalizeOwner(input.owner, actor);
+        let owner = input.owner === undefined ? current.owner : normalizeOwner(input.owner, actor);
+        let ownerClaimed = false;
+        if (input.owner === undefined && declaredActor && owner !== actor.name) {
+          const claiming = current.status === "open" && status === "in_progress";
+          const takingOver = current.status === "in_progress" && input.takeover === true;
+          if (claiming || takingOver) {
+            owner = actor.name;
+            ownerClaimed = true;
+          }
+        }
         const priority = input.priority ?? current.priority;
         const risk = input.risk === undefined ? current.risk : input.risk;
 
@@ -1356,13 +1467,27 @@ export function updateWork(
           ).run(input.id, dependency, nowIso());
         }
 
-        const evidenceItems = input.evidence ?? [];
-        const continuityItems = evidenceItems.filter(
-          (item) => item.kind === "handoff" || item.kind === "ruling",
-        );
-        const regularEvidenceItems = evidenceItems.filter(
-          (item) => item.kind !== "handoff" && item.kind !== "ruling",
-        );
+        if (status === "review" && current.status === "in_progress") {
+          const workspace =
+            prepared ?? captureWorkspaceSnapshot(project.worktreePath, current.baseCommit);
+          const rulings = [
+            ...loadWorkContinuity(db, project.projectId, input.id).rulings,
+            ...continuityItems
+              .filter((item) => item.kind === "ruling")
+              .map((item) => rulingFromDetails(item.details, `證據「${item.summary}」`)),
+          ];
+          const issues = [
+            ...serverEvidenceIssues(
+              stricterRisk(current.risk, risk),
+              loadEvidenceReferences(db, project.projectId, input.id),
+              workspace.git,
+              { action: "送審", allowLegacyExitCode: false },
+            ),
+            ...diffHygieneIssues(workspace, scopePaths, rulings),
+          ];
+          const primary = primaryIssue(issues);
+          if (primary) throw gateError(current, issues, primary);
+        }
 
         const changedFields: string[] = [];
         if (input.title !== undefined) changedFields.push("title");
@@ -1372,7 +1497,7 @@ export function updateWork(
         if (input.scopePaths !== undefined) changedFields.push("scopePaths");
         if (input.acceptance !== undefined) changedFields.push("acceptance");
         if (input.status !== undefined && input.status !== current.status) changedFields.push("status");
-        if (input.owner !== undefined) changedFields.push("owner");
+        if (input.owner !== undefined || ownerClaimed) changedFields.push("owner");
         if (input.priority !== undefined) changedFields.push("priority");
         if (input.risk !== undefined) changedFields.push("risk");
         if (input.labels !== undefined) changedFields.push("labels");
@@ -1478,7 +1603,11 @@ export function updateWork(
 
         const work = getWorkView(db, project.projectId, input.id);
         if (!work) throw workNotFound(input.id);
-        return ok("工作已更新。", { work, evidence, addedEvidence });
+        return ok("工作已更新。", {
+          work,
+          evidence: evidence.map(compactEvidenceView),
+          addedEvidence: addedEvidence.map(compactEvidenceView),
+        });
       }),
   );
 }

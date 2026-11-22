@@ -6,6 +6,7 @@ import {
   insertEvidence,
   insertWork,
   readWork,
+  withActor,
   withLifecycle,
 } from "./helpers.ts";
 
@@ -23,7 +24,7 @@ describe("work_review 的介面", () => {
   test("成功外框固定為 ok、summary、data", async () => {
     await withLifecycle(async ({ db, projectId, context }) => {
       const workId = insertWork(db, projectId, { status: "review" });
-      const result = await callReview(context, {
+      const result = await callReview(withActor(context, "momus"), {
         id: workId,
         expectedVersion: 1,
         verdict: "approve",
@@ -64,6 +65,56 @@ describe("work_review 的審查規則", () => {
     });
   });
 
+  test("owner 在 reviewer 填別人的名字也不能 approve 自己的項目", async () => {
+    await withLifecycle(async ({ db, projectId, context }) => {
+      const workId = insertWork(db, projectId, { owner: "build", status: "review" });
+      const spoofed = await callReview(context, {
+        id: workId,
+        expectedVersion: 1,
+        verdict: "approve",
+        reviewer: "momus",
+      });
+
+      expect(spoofed.ok).toBe(false);
+      if (spoofed.ok) return;
+      expect(spoofed.code).toBe("REVIEWER_IS_OWNER");
+      expect(spoofed.data).toMatchObject({ owner: "build", reviewer: "momus", actor: "build" });
+      expect(readWork(db, workId)?.review).toBeNull();
+
+      const genuine = await callReview(withActor(context, "momus"), {
+        id: workId,
+        expectedVersion: 1,
+        verdict: "approve",
+      });
+      expect(genuine.ok).toBe(true);
+    });
+  });
+
+  test("未宣告身分的呼叫者仍以 reviewer 欄位判斷是否為 owner", async () => {
+    await withLifecycle(async ({ db, projectId, context }) => {
+      const workId = insertWork(db, projectId, { owner: "build", status: "review" });
+      const anonymous = { ...context, actor: { name: "unknown", model: "unknown", declared: false } };
+
+      const asOwner = await callReview(anonymous, {
+        id: workId,
+        expectedVersion: 1,
+        verdict: "approve",
+        reviewer: "build",
+      });
+      expect(asOwner.ok).toBe(false);
+      if (asOwner.ok) return;
+      expect(asOwner.code).toBe("REVIEWER_IS_OWNER");
+
+      const named = await callReview(anonymous, {
+        id: workId,
+        expectedVersion: 1,
+        verdict: "approve",
+        reviewer: "momus",
+      });
+      expect(named.ok).toBe(true);
+    });
+  });
+
   test("owner 可以記錄 concerns 與 reject，但不能當作通過", async () => {
     await withLifecycle(async ({ db, projectId, context }) => {
       const workId = insertWork(db, projectId, { owner: "build", status: "review" });
@@ -93,7 +144,7 @@ describe("work_review 的審查規則", () => {
   test("記錄 verdict、note、reviewer 與審查版本，並把工作推進到 review", async () => {
     await withLifecycle(async ({ db, projectId, context }) => {
       const workId = insertWork(db, projectId, { status: "review", version: 4 });
-      const result = await callReview(context, {
+      const result = await callReview(withActor(context, "momus"), {
         id: workId,
         expectedVersion: 4,
         verdict: "approve",
@@ -135,7 +186,7 @@ describe("work_review 的審查規則", () => {
   test("in_progress 可以記錄審查並推進到 review", async () => {
     await withLifecycle(async ({ db, projectId, context }) => {
       const workId = insertWork(db, projectId, { status: "in_progress", version: 1 });
-      const result = await callReview(context, {
+      const result = await callReview(withActor(context, "momus"), {
         id: workId,
         expectedVersion: 1,
         verdict: "approve",
@@ -169,7 +220,7 @@ describe("work_review 的審查規則", () => {
       const workId = insertWork(db, projectId, { risk: "high", status: "review", acceptance: ["a"] });
       const evidenceId = insertEvidence(db, projectId, workId, { serverIssued: true });
 
-      const review = await callReview(context, {
+      const review = await callReview(withActor(context, "momus"), {
         id: workId,
         expectedVersion: 1,
         verdict: "approve",
@@ -193,7 +244,7 @@ describe("work_review 的審查規則", () => {
       expect(stale.code).toBe("REVIEW_STALE");
       expect(stale.data).toMatchObject({ reviewedVersion: 2, currentVersion: 3 });
 
-      const again = await callReview(context, {
+      const again = await callReview(withActor(context, "momus"), {
         id: workId,
         expectedVersion: 3,
         verdict: "approve",
@@ -213,7 +264,7 @@ describe("work_review 的審查規則", () => {
   test("非法狀態不能記錄審查", async () => {
     await withLifecycle(async ({ db, projectId, context }) => {
       const open = insertWork(db, projectId, { status: "open" });
-      const fromOpen = await callReview(context, {
+      const fromOpen = await callReview(withActor(context, "momus"), {
         id: open,
         expectedVersion: 1,
         verdict: "approve",
@@ -224,7 +275,7 @@ describe("work_review 的審查規則", () => {
       expect(fromOpen.code).toBe("INVALID_TRANSITION");
 
       const blocked = insertWork(db, projectId, { status: "blocked" });
-      const fromBlocked = await callReview(context, {
+      const fromBlocked = await callReview(withActor(context, "momus"), {
         id: blocked,
         expectedVersion: 1,
         verdict: "approve",
@@ -235,7 +286,7 @@ describe("work_review 的審查規則", () => {
       expect(fromBlocked.code).toBe("INVALID_TRANSITION");
 
       const done = insertWork(db, projectId, { status: "done", resolution: "completed" });
-      const fromDone = await callReview(context, {
+      const fromDone = await callReview(withActor(context, "momus"), {
         id: done,
         expectedVersion: 1,
         verdict: "approve",
@@ -249,7 +300,7 @@ describe("work_review 的審查規則", () => {
 
   test("找不到工作或版本不符時拒絕審查", async () => {
     await withLifecycle(async ({ db, projectId, context }) => {
-      const missing = await callReview(context, {
+      const missing = await callReview(withActor(context, "momus"), {
         id: "work-does-not-exist",
         expectedVersion: 1,
         verdict: "approve",
@@ -260,7 +311,7 @@ describe("work_review 的審查規則", () => {
       expect(missing.code).toBe("WORK_NOT_FOUND");
 
       const workId = insertWork(db, projectId, { status: "review", version: 5 });
-      const conflict = await callReview(context, {
+      const conflict = await callReview(withActor(context, "momus"), {
         id: workId,
         expectedVersion: 2,
         verdict: "approve",

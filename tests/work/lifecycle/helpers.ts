@@ -65,6 +65,11 @@ export async function withLifecycle<T>(
   });
 }
 
+/** 同一個資料庫與專案，但以另一個代理身分呼叫工具；用來模擬真正的獨立審查者。 */
+export function withActor(context: ToolContext, name: string): ToolContext {
+  return { ...context, actor: { name, model: "test-model", declared: true } };
+}
+
 export function insertWork(db: Database, projectId: string, options: InsertWorkOptions = {}): string {
   const workId = options.workId ?? `work-${randomUUID()}`;
   const now = new Date().toISOString();

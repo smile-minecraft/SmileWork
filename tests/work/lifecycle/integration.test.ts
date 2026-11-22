@@ -80,11 +80,12 @@ describe("透過 MCP 跑一輪審查與結案", () => {
       });
       db.close();
 
+      // 工作的 owner 是 build；審查與結案由真正的另一個代理 momus 執行。
       const server = await startServer({
         ...process.env,
         SMILEWORK_HOME: home,
         SMILEWORK_PROJECT: repo,
-        SMILEWORK_ACTOR: "build",
+        SMILEWORK_ACTOR: "momus",
         SMILEWORK_MODEL: "test-model",
       });
 
@@ -169,12 +170,23 @@ describe("透過 MCP 跑一輪審查與結案", () => {
         const evidenceId = evidence[0]?.evidenceId;
         if (!evidenceId) throw new Error("work_update 沒有回傳證據識別碼。");
 
-        const reviewed = await callOk(server.client, "work_review", {
-          id: work.id,
-          expectedVersion: 2,
-          verdict: "approve",
-          reviewer: "momus",
+        const reviewerServer = await startServer({
+          ...process.env,
+          SMILEWORK_HOME: home,
+          SMILEWORK_PROJECT: repo,
+          SMILEWORK_ACTOR: "momus",
+          SMILEWORK_MODEL: "test-model",
         });
+        let reviewed: Record<string, unknown>;
+        try {
+          reviewed = await callOk(reviewerServer.client, "work_review", {
+            id: work.id,
+            expectedVersion: 2,
+            verdict: "approve",
+          });
+        } finally {
+          await reviewerServer.close();
+        }
         expect(reviewed).toMatchObject({ status: "review", version: 3, reviewedVersion: 3 });
 
         const completed = await callOk(server.client, "work_complete", {

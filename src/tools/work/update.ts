@@ -31,6 +31,7 @@ const inputSchema = z.object({
   addDependsOn: z.array(z.string().min(1).max(200)).max(100).optional(),
   removeDependsOn: z.array(z.string().min(1).max(200)).max(100).optional(),
   evidence: z.array(evidenceSchema).max(50).optional(),
+  takeover: z.boolean().optional().describe("接手他人進行中的工作"),
   idempotencyKey: z.string().min(1).max(200).optional(),
 });
 
@@ -38,7 +39,7 @@ export const tool = defineTool({
   name: "work_update",
   title: "更新工作",
   description:
-    "以 expectedVersion 更新欄位、狀態、依賴與證據。evidence.kind=handoff 用 details 記錄交接；kind=ruling 記錄決定（decision、rationale、costIfWrong）。成功回應新增 data.addedEvidence（本次新增證據的 evidenceId，無新增時為空陣列）；data.evidence 保留完整清單。版本不符時回 VERSION_CONFLICT。",
+    "以 expectedVersion 更新欄位、狀態、依賴與證據。open→in_progress 會把 owner 設為呼叫者；他人進行中的工作需 takeover 或 handoff，否則回 WORK_ALREADY_CLAIMED。in_progress→review 是送審：中高風險需目前工作區上成功的 verify_run 證據，且須通過 diff 衛生與 scopePaths 檢查。evidence.kind=handoff 用 details 記錄交接；kind=ruling 記錄決定（decision、rationale、costIfWrong），也用來記錄 diff-hygiene／scope-override 例外。data.addedEvidence 是本次新增的證據；回應中的 output 超過 500 字會截斷（outputTruncated），完整內容用 work_get。版本不符時回 VERSION_CONFLICT。",
   domain: "work",
   inputSchema,
   handler: (input, context) => {
