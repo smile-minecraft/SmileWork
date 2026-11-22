@@ -10,14 +10,14 @@ import {
 } from "../../verify/index.ts";
 
 const inputSchema = z.object({
-  workId: z.string().min(1).optional().describe("要關聯證據的工作識別碼；與 workItemId 擇一。"),
-  workItemId: z.string().min(1).optional().describe("workId 的別名，與 workId 擇一。"),
-  runner: z.string().min(1).describe("bun、npm、pytest、cargo、gradle、swift 或 script。"),
-  script: z.string().optional().describe("套件 runner 的 script；script runner 填 verify／check／test；直接 runner 只能省略或 test。"),
-  args: z.array(z.string()).optional().describe("runner 的額外參數，只接受白名單旗標。"),
-  cwd: z.string().optional().describe("專案內的工作目錄；相對路徑以專案根目錄為基準。"),
-  timeoutMs: z.number().int().positive().optional().describe("逾時毫秒數，上限 600000。"),
-  projectPath: z.string().optional().describe("專案路徑；省略時依 SMILEWORK_PROJECT 或 cwd 解析。"),
+  workId: z.string().min(1).optional().describe("工作 id；與 workItemId 擇一。"),
+  workItemId: z.string().min(1).optional().describe("workId 別名。"),
+  runner: z.string().min(1).describe("bun／npm／pytest／cargo／gradle／swift／script。"),
+  script: z.string().optional().describe("套件 script；script runner 用 verify／check／test，直接 runner 省略或 test。"),
+  args: z.array(z.string()).optional().describe("白名單旗標。"),
+  cwd: z.string().optional().describe("專案內工作目錄。"),
+  timeoutMs: z.number().int().positive().optional().describe("毫秒，上限 600000。"),
+  projectPath: z.string().optional().describe("專案路徑；省略用 SMILEWORK_PROJECT 或 cwd。"),
 });
 
 export const tool = defineTool({
