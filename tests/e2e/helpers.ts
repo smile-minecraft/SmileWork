@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ToolResult } from "../../src/shared/result.ts";
 import { createGitRepo } from "../helpers/git.ts";
@@ -144,4 +144,155 @@ export function countO200kTokens(text: string): number | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * 多進位端對端測試用的驗證腳本：固定吐出超過 20KB 的雜訊，
+ * 成敗由 src/passing.marker 決定，讓測試只改 scope 內的 src/ 就能切換結果。
+ */
+export const NOISY_VERIFY_SCRIPT = `#!/usr/bin/env bash
+set -uo pipefail
+awk 'BEGIN { for (i = 1; i <= 600; i++) printf "verify-noise-%04d %s\\n", i, "0123456789012345678901234567890123456789" }'
+if [[ -f src/passing.marker ]]; then
+  echo "verify: PASS"
+  exit 0
+fi
+echo "FAIL src/workflow.ts > verification is red" >&2
+echo "AssertionError: expected green verification" >&2
+exit 1
+`;
+
+function commitFixture(cwd: string): void {
+  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1" };
+  const add = Bun.spawnSync(["git", "add", "-A"], { cwd, env });
+  if (add.exitCode !== 0) throw new Error(`git add failed: ${add.stderr}`);
+  const commit = Bun.spawnSync(["git", "commit", "-m", "fixture"], { cwd, env });
+  if (commit.exitCode !== 0) throw new Error(`git commit failed: ${commit.stderr}`);
+}
+
+export interface ScriptFixtureProject {
+  repo: string;
+  source: string;
+  marker: string;
+  outside: string;
+}
+
+/**
+ * 建立一個所有 fixture 檔案都已提交的 git 專案，讓工作的 baseCommit 乾淨，
+ * 測試期間的改動才會精確落在 scopePaths 與 diff 衛生的檢查範圍內。
+ */
+export async function createScriptFixtureProject(root: string): Promise<ScriptFixtureProject> {
+  const repo = await createGitRepo(join(root, "project"));
+  const scripts = join(repo, "scripts");
+  const src = join(repo, "src");
+  await mkdir(scripts, { recursive: true });
+  await mkdir(src, { recursive: true });
+  await writeFile(
+    join(repo, "package.json"),
+    `${JSON.stringify({ name: "multi-client-fixture", private: true }, null, 2)}\n`,
+    "utf8",
+  );
+  const script = join(scripts, "verify.sh");
+  await writeFile(script, NOISY_VERIFY_SCRIPT, "utf8");
+  await chmod(script, 0o755);
+  const source = join(src, "workflow.ts");
+  await writeFile(source, 'export const workflow = "baseline";\n', "utf8");
+  commitFixture(repo);
+  return { repo, source, marker: join(src, "passing.marker"), outside: join(repo, "outside.txt") };
+}
+
+export interface RawFrame {
+  jsonrpc: string;
+  id?: number | string;
+  method?: string;
+  result?: unknown;
+  error?: unknown;
+}
+
+export interface RawStdioSession {
+  send(frame: unknown): Promise<void>;
+  waitForResponse(id: number, timeoutMs?: number): Promise<RawFrame>;
+  lines(): string[];
+  stderrText(): Promise<string>;
+  close(): Promise<number | null>;
+}
+
+function tryParseFrame(line: string): RawFrame | null {
+  try {
+    const value = JSON.parse(line) as RawFrame;
+    return value !== null && typeof value === "object" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 直接對 child process 的 stdin/stdout 送收 JSON-RPC frame，不經過 MCP client 函式庫。 */
+export async function startRawStdioSession(env: Record<string, string>): Promise<RawStdioSession> {
+  const child = Bun.spawn([process.execPath, "src/cli/index.ts", "mcp"], {
+    cwd: repoRoot,
+    env,
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const reader = child.stdout.getReader();
+  const decoder = new TextDecoder();
+  const lines: string[] = [];
+  let buffer = "";
+  const pump = (async () => {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let index = buffer.indexOf("\n");
+      while (index >= 0) {
+        lines.push(buffer.slice(0, index));
+        buffer = buffer.slice(index + 1);
+        index = buffer.indexOf("\n");
+      }
+    }
+    if (buffer.length > 0) lines.push(buffer);
+  })();
+  const stderr = new Response(child.stderr).text();
+
+  return {
+    async send(frame: unknown): Promise<void> {
+      child.stdin.write(new TextEncoder().encode(`${JSON.stringify(frame)}\n`));
+    },
+    async waitForResponse(id: number, timeoutMs = 10_000): Promise<RawFrame> {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const match = lines
+          .map(tryParseFrame)
+          .find(
+            (parsed) =>
+              parsed !== null &&
+              parsed.id === id &&
+              (Object.hasOwn(parsed, "result") || Object.hasOwn(parsed, "error")),
+          );
+        if (match) return match;
+        if (child.exitCode !== null) {
+          throw new Error(`stdio server exited before response ${id}; stderr: ${await stderr}`);
+        }
+        await Bun.sleep(10);
+      }
+      throw new Error(`timed out waiting for response ${id}; stderr: ${await stderr}`);
+    },
+    lines(): string[] {
+      return [...lines];
+    },
+    stderrText(): Promise<string> {
+      return stderr;
+    },
+    async close(): Promise<number | null> {
+      try {
+        child.stdin.end();
+      } catch {
+        // stdin 已關閉時直接等進程結束。
+      }
+      await child.exited;
+      await pump;
+      return child.exitCode;
+    },
+  };
 }
