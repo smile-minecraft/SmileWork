@@ -3,6 +3,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { registerPrompts } from "../prompts/index.ts";
 import { registerResources } from "../resources/index.ts";
 import { SERVER_NAME, SERVER_VERSION } from "../shared/version.ts";
+import { createSharedDatabase, type CreateToolContextOptions, type SharedDatabase } from "./context.ts";
 import { buildServerInstructions } from "./instructions.ts";
 import {
   loadSmileworkConfig,
@@ -12,6 +13,7 @@ import {
 } from "./profiles.ts";
 import { TOOL_DEFINITIONS } from "./registry.ts";
 import { runTool } from "./result.ts";
+import { installStdioStdoutGuard } from "./stdio-guard.ts";
 import { passThroughInputSchema } from "./validation.ts";
 
 export const SERVER_INFO = {
@@ -22,13 +24,19 @@ export const SERVER_INFO = {
 export interface CreateMcpServerOptions extends LoadConfigOptions {
   /** 已解析的設定；startMcpServer 只載入一次，所有連線共用。 */
   config?: SmileworkConfig;
+  /** startMcpServer 注入的共用連線；單獨建立伺服器時才自行建立。 */
+  sharedDb?: SharedDatabase;
 }
 
 /**
  * 只掛載目前 profile 允許的工具。
  * registry 保留全部 21 個定義，實際暴露哪些由 profile 與設定決定。
  */
-function registerProfileTools(server: McpServer, config: SmileworkConfig): void {
+function registerProfileTools(
+  server: McpServer,
+  config: SmileworkConfig,
+  contextOptions: CreateToolContextOptions,
+): void {
   const enabled = new Set(config.tools);
   for (const tool of TOOL_DEFINITIONS) {
     if (!enabled.has(tool.name)) continue;
@@ -40,7 +48,8 @@ function registerProfileTools(server: McpServer, config: SmileworkConfig): void 
         description: presentation.description,
         inputSchema: passThroughInputSchema(tool.inputSchema),
       },
-      async (input: unknown) => runTool(tool, (input ?? {}) as Record<string, unknown>),
+      async (input: unknown) =>
+        runTool(tool, (input ?? {}) as Record<string, unknown>, contextOptions),
     );
   }
 }
@@ -48,13 +57,30 @@ function registerProfileTools(server: McpServer, config: SmileworkConfig): void 
 /** 建立一個連線用的伺服器實例；serveStdio 每次連線會呼叫一次。 */
 export function createMcpServer(options: CreateMcpServerOptions = {}): McpServer {
   const config = options.config ?? loadSmileworkConfig(options);
+  const sharedDb = options.sharedDb ?? createSharedDatabase({ env: options.env });
+  const contextOptions: CreateToolContextOptions = {
+    env: options.env,
+    cwd: options.cwd,
+    sharedDb,
+  };
   const server = new McpServer(SERVER_INFO, {
     capabilities: { tools: {}, resources: {}, prompts: {} },
     instructions: buildServerInstructions(config.profile),
   });
-  registerProfileTools(server, config);
+  registerProfileTools(server, config, contextOptions);
   registerResources(server);
   registerPrompts(server);
+
+  if (options.sharedDb === undefined) {
+    const closeServer = server.close.bind(server);
+    server.close = async () => {
+      try {
+        await closeServer();
+      } finally {
+        sharedDb.close();
+      }
+    };
+  }
   return server;
 }
 
@@ -64,28 +90,36 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): McpServer
  */
 export async function startMcpServer(options: CreateMcpServerOptions = {}): Promise<number> {
   const config = options.config ?? loadSmileworkConfig(options);
-  for (const warning of config.warnings) {
-    console.error(`[smilework] 設定警告：${warning}`);
-  }
+  const guard = installStdioStdoutGuard();
+  const sharedDb = createSharedDatabase({ env: options.env });
 
-  const handle = serveStdio(() => createMcpServer({ ...options, config }), {
-    onerror: (error) => {
-      console.error(`[smilework] MCP 錯誤：${error.message}`);
-    },
-  });
+  try {
+    for (const warning of config.warnings) {
+      console.error(`[smilework] 設定警告：${warning}`);
+    }
 
-  if (!process.stdin.readableEnded && !process.stdin.destroyed) {
-    await new Promise<void>((resolve) => {
-      const done = (): void => {
-        process.stdin.off("end", done);
-        process.stdin.off("close", done);
-        resolve();
-      };
-      process.stdin.once("end", done);
-      process.stdin.once("close", done);
+    const handle = serveStdio(() => createMcpServer({ ...options, config, sharedDb }), {
+      onerror: (error) => {
+        console.error(`[smilework] MCP 錯誤：${error.message}`);
+      },
     });
-  }
 
-  await handle.close();
+    if (!process.stdin.readableEnded && !process.stdin.destroyed) {
+      await new Promise<void>((resolve) => {
+        const done = (): void => {
+          process.stdin.off("end", done);
+          process.stdin.off("close", done);
+          resolve();
+        };
+        process.stdin.once("end", done);
+        process.stdin.once("close", done);
+      });
+    }
+
+    await handle.close();
+  } finally {
+    sharedDb.close();
+    guard.restore();
+  }
   return 0;
 }
