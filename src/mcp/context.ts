@@ -12,8 +12,32 @@ export interface CreateToolContextOptions {
   cwd?: string;
   /** 測試注入既有連線；注入的連線不會被 context 關閉。 */
   db?: Database;
+  /** MCP 伺服器持有的共用連線；context 不會關閉它。 */
+  sharedDb?: SharedDatabase;
   /** 測試可關閉自動登記專案。 */
   registerProject?: boolean;
+}
+
+/** 單一 MCP 伺服器 process 內共用的資料庫連線。 */
+export interface SharedDatabase {
+  get(): Database;
+  close(): void;
+}
+
+/** 第一次用到才開啟資料庫，由呼叫端決定何時釋放。 */
+export function createSharedDatabase(options: { env?: NodeJS.ProcessEnv } = {}): SharedDatabase {
+  let database: Database | null = null;
+  return {
+    get(): Database {
+      database ??= openDatabase({ env: options.env });
+      return database;
+    },
+    close(): void {
+      if (!database) return;
+      database.close();
+      database = null;
+    },
+  };
 }
 
 export function createToolContext(options: CreateToolContextOptions = {}): ToolContext {
@@ -22,10 +46,12 @@ export function createToolContext(options: CreateToolContextOptions = {}): ToolC
   const shouldRegister = options.registerProject !== false;
 
   let database: Database | null = options.db ?? null;
-  const ownsDatabase = options.db === undefined;
+  const ownsDatabase = options.db === undefined && options.sharedDb === undefined;
 
   const db = (): Database => {
-    database ??= openDatabase({ env });
+    if (!database) {
+      database = options.sharedDb?.get() ?? openDatabase({ env });
+    }
     return database;
   };
 

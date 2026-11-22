@@ -118,6 +118,14 @@ function isImportedPlaceholder(record: ProjectRow): boolean {
   return record.common_dir.startsWith("import:") && record.root_path.startsWith("import:");
 }
 
+/** 最近看過的專案直接回傳，避免每次唯讀呼叫都去搶 SQLite 寫入鎖。 */
+export const REGISTER_TOUCH_INTERVAL_MS = 60_000;
+
+function seenRecently(timestamp: string, now: number): boolean {
+  const seen = Date.parse(timestamp);
+  return Number.isFinite(seen) && Math.abs(now - seen) <= REGISTER_TOUCH_INTERVAL_MS;
+}
+
 /**
  * 登記或更新專案與 worktree；重複呼叫的結果相同。
  * 同一個 projectId 或 worktree 路徑已經屬於別的專案時要拒絕，
@@ -125,6 +133,32 @@ function isImportedPlaceholder(record: ProjectRow): boolean {
  */
 export function registerProject(db: Database, context: ProjectContext): ProjectRecord {
   const now = nowIso();
+  const nowMs = Date.now();
+  const existing = db
+    .query<ProjectRow, [string]>("SELECT * FROM projects WHERE project_id = ?")
+    .get(context.projectId);
+  const existingWorktree = existing
+    ? db
+        .query<{ project_id: string; last_seen_at: string }, [string]>(
+          "SELECT project_id, last_seen_at FROM project_worktrees WHERE worktree_path = ?",
+        )
+        .get(context.worktreePath)
+    : null;
+
+  if (
+    existing !== null &&
+    existingWorktree !== null &&
+    existing.common_dir === context.commonDir &&
+    !isImportedPlaceholder(existing) &&
+    !existing.root_path.startsWith("import:") &&
+    existingWorktree.project_id === context.projectId &&
+    seenRecently(existing.last_seen_at, nowMs) &&
+    seenRecently(existingWorktree.last_seen_at, nowMs)
+  ) {
+    const cached = getProject(db, context.projectId);
+    if (cached) return cached;
+  }
+
   try {
     withImmediateTransaction(db, () => {
       const existing = db

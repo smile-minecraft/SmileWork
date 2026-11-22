@@ -50,10 +50,30 @@ export function gitHeadFor(path: string): string | null {
   }
 }
 
+const GIT_LOCATION_TTL_MS = 5_000;
+
+interface CachedGitLocation {
+  value: GitLocation;
+  expiresAt: number;
+}
+
+const gitLocationCache = new Map<string, CachedGitLocation>();
+
+/** 測試重建暫存 repo 後呼叫，避免拿到舊位置的結果。 */
+export function clearGitLocationCache(): void {
+  gitLocationCache.clear();
+}
+
 /** 解析路徑所在的 git worktree；不是 git repo 時回 null。 */
 export function gitLocationFor(path: string): GitLocation | null {
   const directory = existingDirectory(path);
   if (!directory) return null;
+
+  const cached = gitLocationCache.get(directory);
+  if (cached) {
+    if (cached.expiresAt > Date.now()) return { ...cached.value };
+    gitLocationCache.delete(directory);
+  }
 
   try {
     const rootPath = realpathSync(gitOutput(directory, ["rev-parse", "--show-toplevel"]));
@@ -61,7 +81,12 @@ export function gitLocationFor(path: string): GitLocation | null {
     const gitDir = realpathSync(resolve(directory, gitOutput(directory, ["rev-parse", "--git-dir"])));
     const mainRaw = mainWorktreeFromPorcelain(gitOutput(directory, ["worktree", "list", "--porcelain"]));
     const mainWorktreePath = mainRaw ? realpathSync(mainRaw) : rootPath;
-    return { rootPath, mainWorktreePath, commonDir, gitDir };
+    const location = { rootPath, mainWorktreePath, commonDir, gitDir };
+    gitLocationCache.set(directory, {
+      value: location,
+      expiresAt: Date.now() + GIT_LOCATION_TTL_MS,
+    });
+    return location;
   } catch {
     return null;
   }
