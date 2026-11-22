@@ -160,6 +160,12 @@ describe("verify_run 端到端", () => {
       expect(response.data?.command).toEqual([bunPath, "run", "test"]);
       expect(String(response.data?.stdout)).toContain("BUN_ARGS:run test");
       expect(String(response.data?.stdout)).toContain("TESTS: 3 passed");
+      expect(response.data?.responseTruncated).toBe(false);
+      expect(response.data?.outputTail).toBe("BUN_ARGS:run test\nTESTS: 3 passed");
+      expect(response.data?.errorHighlights).toEqual([]);
+      expect(response.data?.gitHead).toMatch(/^[0-9a-f]{40}$/);
+      expect(response.data?.treeFingerprint).toMatch(/^[0-9a-f]{64}$/);
+      expect(response.data?.workingTreeClean).toBe(true);
 
       const evidence = response.data?.evidence as {
         evidenceId: string;
@@ -210,7 +216,13 @@ describe("verify_run 端到端", () => {
         passed: true,
         timedOut: false,
         truncated: false,
+        isGitRepo: true,
+        gitHead: response.data?.gitHead,
+        workingTreeClean: true,
+        treeFingerprint: response.data?.treeFingerprint,
+        treeChangedDuringRun: false,
       });
+      expect(evidenceFile(row)).toContain(`treeFingerprint: ${String(response.data?.treeFingerprint)}`);
     });
   });
 
@@ -294,10 +306,13 @@ describe("verify_run 端到端", () => {
       expect(response.ok).toBe(true);
       expect(response.data?.command).toEqual([swiftPath, "test"]);
       expect(response.data?.truncated).toBe(true);
-      expect(String(response.data?.stdout).startsWith("SWIFT_START")).toBe(true);
-      expect(Buffer.byteLength(String(response.data?.stdout), "utf8")).toBeLessThanOrEqual(
-        DEFAULT_MAX_OUTPUT_BYTES,
-      );
+      // 回應只帶尾端；完整（擷取上限內的）輸出留在證據檔。
+      expect(response.data?.responseTruncated).toBe(true);
+      expect(Buffer.byteLength(String(response.data?.stdout), "utf8")).toBeLessThanOrEqual(2048);
+      expect(String(response.data?.stdout)).toEndWith("0123456789\n");
+      expect(Buffer.byteLength(String(response.data?.outputTail), "utf8")).toBeLessThanOrEqual(4096);
+      expect(String(response.data?.outputTail).split("\n").length).toBeLessThanOrEqual(40);
+      expect(Buffer.byteLength(JSON.stringify(response), "utf8")).toBeLessThan(16_384);
 
       const evidence = response.data?.evidence as { evidenceId: string };
       const row = readEvidenceRow(fixture.db, evidence.evidenceId);
@@ -305,6 +320,8 @@ describe("verify_run 端到端", () => {
       expect(details.truncated).toBe(true);
       const output = evidenceFile(row);
       expect(output).toContain("truncated: true");
+      expect(output).toContain("SWIFT_START");
+      expect(response.data?.outputPath).toBe(row.output_path);
       expect(Buffer.byteLength(output, "utf8")).toBeLessThan(DEFAULT_MAX_OUTPUT_BYTES + 10_000);
     });
   });
@@ -379,6 +396,108 @@ describe("verify_run 端到端", () => {
       expect(String(response.data?.stdout)).toContain(
         "GRADLE_ARGS:test --rerun-tasks --tests com.example.*",
       );
+    });
+  });
+});
+
+describe("verify_run 的 script runner", () => {
+  function writeScript(project: string, name: string, body: string, mode = 0o755): string {
+    mkdirSync(join(project, "scripts"), { recursive: true });
+    const path = join(project, "scripts", name);
+    writeFileSync(path, `#!/bin/sh\n${body}\n`, "utf8");
+    chmodSync(path, mode);
+    return path;
+  }
+
+  test("verify／check／test 執行固定的 scripts/<name>.sh，不經過 shell", async () => {
+    await withVerifyFixture(async (fixture) => {
+      for (const name of ["verify", "check", "test"]) {
+        const path = writeScript(fixture.project, `${name}.sh`, `printf "SCRIPT:${name}:%s\\n" "$#"`);
+        const response = await callVerify(fixture, {
+          workId: fixture.workId,
+          runner: "script",
+          script: name,
+        });
+        expect(response.ok).toBe(true);
+        expect(response.data?.command).toEqual([realpathSync(path)]);
+        expect(String(response.data?.stdout)).toContain(`SCRIPT:${name}:0`);
+      }
+    });
+  });
+
+  test("失敗的腳本留下證據並帶出錯誤重點", async () => {
+    await withVerifyFixture(async (fixture) => {
+      writeScript(
+        fixture.project,
+        "verify.sh",
+        ['echo "running"', 'echo "FAIL tests/a.test.ts > adds"', 'echo "AssertionError: expected 3" >&2', "exit 2"].join("\n"),
+      );
+      const response = await callVerify(fixture, { workId: fixture.workId, runner: "script", script: "verify" });
+      expect(response.ok).toBe(true);
+      expect(response.data).toMatchObject({ passed: false, exitCode: 2 });
+      expect(response.data?.errorHighlights).toEqual([
+        "FAIL tests/a.test.ts > adds",
+        "AssertionError: expected 3",
+      ]);
+      expect(String(response.data?.outputTail)).toContain("AssertionError: expected 3");
+    });
+  });
+
+  test("未知名稱、帶 args、symlink、不可執行或不存在的腳本都被拒絕", async () => {
+    await withVerifyFixture(async (fixture) => {
+      const unknown = await callVerify(fixture, { workId: fixture.workId, runner: "script", script: "deploy" });
+      expect(unknown.code).toBe("SCRIPT_NOT_ALLOWED");
+
+      const missing = await callVerify(fixture, { workId: fixture.workId, runner: "script", script: "verify" });
+      expect(missing.code).toBe("PROJECT_SCRIPT_NOT_FOUND");
+
+      writeScript(fixture.project, "verify.sh", 'echo "should not run"');
+      const withArgs = await callVerify(fixture, {
+        workId: fixture.workId,
+        runner: "script",
+        script: "verify",
+        args: ["--fast"],
+      });
+      expect(withArgs.code).toBe("ARGS_NOT_ALLOWED");
+      const positional = await callVerify(fixture, {
+        workId: fixture.workId,
+        runner: "script",
+        script: "verify",
+        args: ["tests"],
+      });
+      expect(positional.code).toBe("ARGS_NOT_ALLOWED");
+
+      writeScript(fixture.project, "check.sh", 'echo "no exec"', 0o644);
+      const notExecutable = await callVerify(fixture, { workId: fixture.workId, runner: "script", script: "check" });
+      expect(notExecutable.code).toBe("PROJECT_SCRIPT_NOT_EXECUTABLE");
+
+      const outside = join(fixture.root, "outside.sh");
+      writeFileSync(outside, "#!/bin/sh\necho outside\n", "utf8");
+      chmodSync(outside, 0o755);
+      symlinkSync(outside, join(fixture.project, "scripts", "test.sh"));
+      const linked = await callVerify(fixture, { workId: fixture.workId, runner: "script", script: "test" });
+      expect(linked.code).toBe("PROJECT_SCRIPT_INVALID");
+
+      const count = fixture.db
+        .query<{ count: number }, [string]>("SELECT COUNT(*) AS count FROM evidence WHERE work_id = ?")
+        .get(fixture.workId);
+      expect(count?.count).toBe(0);
+    });
+  });
+
+  test("驗證期間改動工作區時，證據記錄執行前的指紋並標示 treeChangedDuringRun", async () => {
+    await withVerifyFixture(async (fixture) => {
+      writeScript(fixture.project, "verify.sh", 'echo "generated" > generated.txt');
+      const first = await callVerify(fixture, { workId: fixture.workId, runner: "script", script: "verify" });
+      expect(first.ok).toBe(true);
+      const evidence = first.data?.evidence as { evidenceId: string; treeChangedDuringRun: boolean };
+      expect(evidence.treeChangedDuringRun).toBe(true);
+
+      // 工作區穩定後重跑，前後指紋一致。
+      const second = await callVerify(fixture, { workId: fixture.workId, runner: "script", script: "verify" });
+      const again = second.data?.evidence as { treeChangedDuringRun: boolean };
+      expect(again.treeChangedDuringRun).toBe(false);
+      expect(second.data?.treeFingerprint).not.toBe(first.data?.treeFingerprint);
     });
   });
 });

@@ -3,8 +3,18 @@
  * script 只描述「要跑哪一種驗證」，目標與旗標一律放進 args，避免把任意命令塞進 script。
  */
 
-export const SUPPORTED_RUNNERS = ["bun", "npm", "pytest", "cargo", "gradle", "swift"] as const;
+export const SUPPORTED_RUNNERS = ["bun", "npm", "pytest", "cargo", "gradle", "swift", "script"] as const;
 export type VerifyRunner = (typeof SUPPORTED_RUNNERS)[number];
+
+/**
+ * script runner 只能執行專案自己的固定驗證腳本；名稱對到 cwd 內的固定路徑，
+ * 不接受任何 args，避免把任意旗標或命令注入腳本。
+ */
+export const PROJECT_SCRIPTS: Readonly<Record<string, string>> = {
+  verify: "scripts/verify.sh",
+  check: "scripts/check.sh",
+  test: "scripts/test.sh",
+};
 
 export const PACKAGE_RUNNERS: ReadonlySet<VerifyRunner> = new Set(["bun", "npm"]);
 
@@ -89,6 +99,7 @@ export const EXTRA_ARG_FLAG_ALLOWLIST: Readonly<Record<VerifyRunner, readonly st
   ],
   gradle: [],
   swift: ["--filter", "--skip", "-v", "--verbose", "--parallel", "--num-workers"],
+  script: [],
 };
 
 export interface ArgsAccepted {
@@ -118,6 +129,7 @@ export function isPackageScriptAllowed(script: string): boolean {
  */
 export function normalizeScript(runner: VerifyRunner, script: string): string | null {
   if (PACKAGE_RUNNERS.has(runner)) return isPackageScriptAllowed(script) ? script : null;
+  if (runner === "script") return Object.hasOwn(PROJECT_SCRIPTS, script) ? script : null;
   return script === "" || script === "test" ? "test" : null;
 }
 
@@ -182,5 +194,6 @@ export function buildRunnerCommand(
   if (runner === "npm") return [executable, "run", script, "--", ...args];
   if (runner === "gradle") return [executable, "test", ...args];
   if (runner === "pytest") return [executable, ...args];
+  if (runner === "script") return [executable];
   return [executable, "test", ...args];
 }
