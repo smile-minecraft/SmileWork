@@ -35,6 +35,10 @@ describe("MCP 端對端：建立、驗證、審查、結案", () => {
       const server = await startE2eServer(
         e2eEnvironment(home, project.repo, { profile: "full", actor: "e2e-owner" }),
       );
+      // 審查由真正的另一個代理身分執行，reviewer 欄位不能代替身分。
+      const reviewer = await startE2eServer(
+        e2eEnvironment(home, project.repo, { profile: "full", actor: "independent-reviewer" }),
+      );
 
       try {
         const created = await callToolOk(server.client, "work_create", {
@@ -64,19 +68,27 @@ describe("MCP 端對端：建立、驗證、審查、結案", () => {
         expect(evidence.serverIssued).toBe(true);
         expect(evidence.evidenceId).toStartWith("evidence-");
         expect(existsSync(evidence.outputPath)).toBe(true);
+        expect(verified.treeFingerprint).toMatch(/^[0-9a-f]{64}$/);
+        expect(verified.outputPath).toBe(evidence.outputPath);
 
-        const concerns = await callToolOk(server.client, "work_review", {
+        const submitted = await callToolOk(server.client, "work_update", {
           id: work.id,
           expectedVersion: 2,
+          status: "review",
+        });
+        expect(workOf(submitted)).toMatchObject({ status: "review", version: 3 });
+
+        const concerns = await callToolOk(reviewer.client, "work_review", {
+          id: work.id,
+          expectedVersion: 3,
           verdict: "concerns",
-          reviewer: "independent-reviewer",
           note: "先確認高風險核准。",
         });
-        expect(concerns).toMatchObject({ status: "review", version: 3 });
+        expect(concerns).toMatchObject({ status: "review", version: 4 });
 
         const blocked = await callTool(server.client, "work_complete", {
           id: work.id,
-          expectedVersion: 3,
+          expectedVersion: 4,
           acceptance: [
             { criterion: "verify_run 通過", met: true, evidenceIds: [evidence.evidenceId] },
             { criterion: "獨立審查完成", met: true, evidenceIds: [evidence.evidenceId] },
@@ -88,18 +100,17 @@ describe("MCP 端對端：建立、驗證、審查、結案", () => {
           expect(blocked.data.blockedBy).toContain("REVIEW_REQUIRED");
         }
 
-        const approved = await callToolOk(server.client, "work_review", {
+        const approved = await callToolOk(reviewer.client, "work_review", {
           id: work.id,
-          expectedVersion: 3,
+          expectedVersion: 4,
           verdict: "approve",
-          reviewer: "independent-reviewer",
           note: "證據可重現，核准結案。",
         });
-        expect(approved).toMatchObject({ status: "review", version: 4 });
+        expect(approved).toMatchObject({ status: "review", version: 5 });
 
         const completed = await callToolOk(server.client, "work_complete", {
           id: work.id,
-          expectedVersion: 4,
+          expectedVersion: 5,
           acceptance: [
             { criterion: "verify_run 通過", met: true, evidenceIds: [evidence.evidenceId] },
             { criterion: "獨立審查完成", met: true, evidenceIds: [evidence.evidenceId] },
@@ -109,18 +120,18 @@ describe("MCP 端對端：建立、驗證、審查、結案", () => {
         expect(completed).toMatchObject({
           status: "done",
           resolution: "completed",
-          version: 5,
+          version: 6,
         });
 
         const fetched = await callToolOk(server.client, "work_get", { id: work.id });
         expect(fetched.work).toMatchObject({
           status: "done",
           resolution: "completed",
-          version: 5,
+          version: 6,
           review: {
             verdict: "approve",
             reviewer: "independent-reviewer",
-            reviewedVersion: 4,
+            reviewedVersion: 5,
           },
         });
         const acceptanceResults = (fetched.work as Record<string, unknown>)
@@ -135,6 +146,7 @@ describe("MCP 端對端：建立、驗證、審查、結案", () => {
           serverIssued: true,
         });
       } finally {
+        await reviewer.close();
         await server.close();
       }
     });
@@ -147,6 +159,10 @@ describe("MCP 端對端：建立、驗證、審查、結案", () => {
       await project.create({ passing: true });
       const server = await startE2eServer(
         e2eEnvironment(home, project.repo, { profile: "full", actor: "e2e-owner" }),
+      );
+      // 審查由真正的另一個代理身分執行，reviewer 欄位不能代替身分。
+      const reviewer = await startE2eServer(
+        e2eEnvironment(home, project.repo, { profile: "full", actor: "independent-reviewer" }),
       );
 
       try {
@@ -162,11 +178,10 @@ describe("MCP 端對端：建立、驗證、審查、結案", () => {
           expectedVersion: 1,
           status: "in_progress",
         });
-        await callToolOk(server.client, "work_review", {
+        await callToolOk(reviewer.client, "work_review", {
           id: missingAcceptance.id,
           expectedVersion: 2,
           verdict: "approve",
-          reviewer: "independent-reviewer",
         });
         const acceptanceFailure = await callTool(server.client, "work_complete", {
           id: missingAcceptance.id,
@@ -191,11 +206,10 @@ describe("MCP 端對端：建立、驗證、審查、結案", () => {
           expectedVersion: 1,
           status: "in_progress",
         });
-        await callToolOk(server.client, "work_review", {
+        await callToolOk(reviewer.client, "work_review", {
           id: missingEvidence.id,
           expectedVersion: 2,
           verdict: "approve",
-          reviewer: "independent-reviewer",
         });
         const evidenceFailure = await callTool(server.client, "work_complete", {
           id: missingEvidence.id,
@@ -223,11 +237,10 @@ describe("MCP 端對端：建立、驗證、審查、結案", () => {
         });
         const noteEvidence = (highRiskStarted.evidence as EvidenceReference[])[0];
         if (!noteEvidence) throw new Error("work_update 沒有建立人工證據。");
-        await callToolOk(server.client, "work_review", {
+        await callToolOk(reviewer.client, "work_review", {
           id: highRisk.id,
           expectedVersion: 2,
           verdict: "concerns",
-          reviewer: "independent-reviewer",
           note: "尚未提供伺服器證據。",
         });
         const highRiskFailure = await callTool(server.client, "work_complete", {
@@ -269,6 +282,7 @@ describe("MCP 端對端：建立、驗證、審查、結案", () => {
           expect((latest.work as WorkReference).status).not.toBe("done");
         }
       } finally {
+        await reviewer.close();
         await server.close();
       }
     });

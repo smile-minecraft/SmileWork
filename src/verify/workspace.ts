@@ -2,7 +2,7 @@
  * 驗證只能在專案根目錄內執行：
  * - cwd 必須存在，且 lexical 與 realpath 都在專案內（擋 symlink 逃逸）。
  * - 參數解析後若是專案外的既有路徑就拒絕；不存在的路徑交給 runner 自己報錯。
- * - Gradle wrapper 必須是 cwd 內的普通可執行檔，不能是 symlink。
+ * - Gradle wrapper 與專案驗證腳本必須是 cwd 內的普通可執行檔，不能是 symlink。
  */
 
 import { accessSync, constants, lstatSync, realpathSync, statSync } from "node:fs";
@@ -158,4 +158,84 @@ export function inspectGradleWrapper(cwd: string): GradleWrapperInspection {
   }
 
   return { ok: true, path: realpathSync(wrapperPath) };
+}
+
+export interface ProjectScriptFound {
+  ok: true;
+  path: string;
+}
+
+export interface ProjectScriptRejected {
+  ok: false;
+  code: string;
+  message: string;
+  nextAction: string;
+}
+
+export type ProjectScriptInspection = ProjectScriptFound | ProjectScriptRejected;
+
+/**
+ * 專案驗證腳本沿用 Gradle wrapper 的規則：必須在 cwd 內、是普通檔案而不是 symlink、
+ * 具備執行權限；realpath 也必須留在 cwd 內，擋住經由 symlink 資料夾逃逸。
+ */
+export function inspectProjectScript(cwd: string, relativePath: string): ProjectScriptInspection {
+  const scriptPath = join(cwd, relativePath);
+  const nextAction = `在驗證目錄放入專案自己的 ${relativePath}（普通檔案、不是 symlink），並執行 chmod +x ${relativePath}。`;
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(scriptPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return {
+      ok: false,
+      code: code === "ENOENT" ? "PROJECT_SCRIPT_NOT_FOUND" : "PROJECT_SCRIPT_INVALID",
+      message:
+        code === "ENOENT"
+          ? `找不到專案驗證腳本：${scriptPath}。`
+          : `無法檢查專案驗證腳本：${scriptPath}。`,
+      nextAction,
+    };
+  }
+
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    return {
+      ok: false,
+      code: "PROJECT_SCRIPT_INVALID",
+      message: `專案驗證腳本必須是驗證目錄內的普通檔案，且不能是 symbolic link：${scriptPath}`,
+      nextAction,
+    };
+  }
+
+  let real: string;
+  try {
+    real = realpathSync(scriptPath);
+  } catch {
+    return {
+      ok: false,
+      code: "PROJECT_SCRIPT_INVALID",
+      message: `無法解析專案驗證腳本的實際路徑：${scriptPath}`,
+      nextAction,
+    };
+  }
+  if (!isInside(canonical(cwd), real)) {
+    return {
+      ok: false,
+      code: "PROJECT_SCRIPT_INVALID",
+      message: `專案驗證腳本經由 symlink 指向驗證目錄外：${scriptPath}`,
+      nextAction,
+    };
+  }
+
+  try {
+    accessSync(scriptPath, constants.X_OK);
+  } catch {
+    return {
+      ok: false,
+      code: "PROJECT_SCRIPT_NOT_EXECUTABLE",
+      message: `專案驗證腳本不可執行：${scriptPath}`,
+      nextAction,
+    };
+  }
+
+  return { ok: true, path: real };
 }

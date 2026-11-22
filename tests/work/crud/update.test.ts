@@ -48,9 +48,15 @@ describe("work_update", () => {
     });
   });
 
-  test("狀態轉移照狀態機，review 與 done 由其他工具負責", async () => {
+  test("狀態轉移照狀態機：in_progress → review 是受閘門保護的送審，done 由結案工具負責", async () => {
     await withWorkTools(async (context) => {
       const work = expectOk(await context.call("work_create", { title: "狀態測試" })).data.work;
+
+      const fromOpen = expectFail(
+        await context.call("work_update", { id: work.id, expectedVersion: 1, status: "review" }),
+      );
+      expect(fromOpen.code).toBe("INVALID_TRANSITION");
+      expect(fromOpen.data).toMatchObject({ from: "open", to: "review" });
 
       const blocked = expectOk(
         await context.call("work_update", {
@@ -70,19 +76,22 @@ describe("work_update", () => {
       );
       expect(inProgress.data.work).toMatchObject({ status: "in_progress", version: 3 });
 
-      for (const target of ["review", "done"]) {
-        const rejected = expectFail(
-          await context.call("work_update", {
-            id: work.id,
-            expectedVersion: 3,
-            status: target,
-          }),
-        );
-        expect(rejected.code).toBe("INVALID_TRANSITION");
-        expect(rejected.data).toMatchObject({ from: "in_progress", to: target });
-        expect(rejected.nextAction).toContain("work_review");
-        if (target === "done") expect(rejected.nextAction).toContain("work_complete");
-      }
+      const done = expectFail(
+        await context.call("work_update", { id: work.id, expectedVersion: 3, status: "done" }),
+      );
+      expect(done.code).toBe("INVALID_TRANSITION");
+      expect(done.data).toMatchObject({ from: "in_progress", to: "done" });
+      expect(done.nextAction).toContain("work_review");
+      expect(done.nextAction).toContain("work_complete");
+
+      // 預設中風險：沒有伺服器證據時送審被擋下，工作維持 in_progress。
+      const review = expectFail(
+        await context.call("work_update", { id: work.id, expectedVersion: 3, status: "review" }),
+      );
+      expect(review.code).toBe("SERVER_EVIDENCE_REQUIRED");
+      expect(review.data).toMatchObject({ workId: work.id, currentVersion: 3 });
+      const unchanged = expectOk(await context.call("work_get", { id: work.id })).data.work;
+      expect(unchanged).toMatchObject({ status: "in_progress", version: 3 });
 
       const cancelled = expectOk(
         await context.call("work_update", {

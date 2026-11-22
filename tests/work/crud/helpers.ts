@@ -12,6 +12,8 @@ export interface WorkTestContext {
   projectPath: string;
   env: NodeJS.ProcessEnv;
   call(name: string, input: Record<string, unknown>): Promise<ToolResult>;
+  /** 同一個 HOME 與專案，但以另一個代理身分呼叫工具（例如獨立審查者）。 */
+  callAs(actor: string, name: string, input: Record<string, unknown>): Promise<ToolResult>;
   openDb(): Database;
 }
 
@@ -27,17 +29,28 @@ export async function withWorkTools<T>(run: (context: WorkTestContext) => Promis
       SMILEWORK_MODEL: "test-model",
     };
 
+    const callWith = async (
+      callEnv: NodeJS.ProcessEnv,
+      name: string,
+      input: Record<string, unknown>,
+    ): Promise<ToolResult> => {
+      const tool = toolByName(name);
+      if (!tool) throw new Error(`registry 找不到工具：${name}`);
+      const result = await runTool(tool, input, { env: callEnv });
+      const block = result.content[0];
+      if (block?.type !== "text") throw new Error(`工具 ${name} 沒有回傳文字內容。`);
+      return JSON.parse(block.text) as ToolResult;
+    };
+
     const context: WorkTestContext = {
       home,
       projectPath,
       env,
-      async call(name, input) {
-        const tool = toolByName(name);
-        if (!tool) throw new Error(`registry 找不到工具：${name}`);
-        const result = await runTool(tool, input, { env });
-        const block = result.content[0];
-        if (block?.type !== "text") throw new Error(`工具 ${name} 沒有回傳文字內容。`);
-        return JSON.parse(block.text) as ToolResult;
+      call(name, input) {
+        return callWith(env, name, input);
+      },
+      callAs(actor, name, input) {
+        return callWith({ ...env, SMILEWORK_ACTOR: actor }, name, input);
       },
       openDb() {
         return openDatabase({ home });

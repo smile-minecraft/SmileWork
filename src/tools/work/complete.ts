@@ -12,7 +12,7 @@ export const tool = defineTool({
   name: "work_complete",
   title: "結案工作",
   description:
-    "檢查驗收、證據、依賴與審查後結案；非高風險可從 in_progress 直接結案，高風險需非 owner approve 與伺服器證據。",
+    "檢查驗收、證據、依賴與審查後結案；非高風險可從 in_progress 直接結案。中高風險需目前工作區上成功的 verify_run 證據並通過 diff 衛生與 scopePaths 檢查，高風險另需非 owner approve。",
   domain: "work",
   inputSchema: z.object({
     id: z.string().min(1),
@@ -23,12 +23,18 @@ export const tool = defineTool({
   }),
   handler: (input, context) => {
     const project = context.resolveProject();
-    return completeWork(context.db(), project.projectId, context.actor, {
-      id: input.id,
-      expectedVersion: input.expectedVersion,
-      acceptance: input.acceptance,
-      note: input.note,
-      idempotencyKey: input.idempotencyKey,
-    });
+    return completeWork(
+      context.db(),
+      project.projectId,
+      context.actor,
+      {
+        id: input.id,
+        expectedVersion: input.expectedVersion,
+        acceptance: input.acceptance,
+        note: input.note,
+        idempotencyKey: input.idempotencyKey,
+      },
+      { projectRoot: project.worktreePath },
+    );
   },
 });

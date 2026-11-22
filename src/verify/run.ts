@@ -15,6 +15,8 @@ import {
   MAX_ARG_COUNT,
   MAX_ARG_LENGTH,
   normalizeScript,
+  PROJECT_SCRIPTS,
+  SUPPORTED_RUNNERS,
   validateExtraArgs,
   validateGradleArgs,
   type VerifyRunner,
@@ -22,6 +24,7 @@ import {
 import {
   findArgumentOutsideProject,
   inspectGradleWrapper,
+  inspectProjectScript,
   resolveProjectRoot,
   resolveWorkingDirectory,
 } from "./workspace.ts";
@@ -84,6 +87,14 @@ function scriptError(runner: VerifyRunner, rawScript: string): SmileworkError {
       `不允許的 script："${rawScript || "（空白）"}"。`,
       '套件 runner 只允許 test／lint／typecheck／check／verify family（可帶 :suffix），或 format:check／format:verify。例如 script: "test"、"test:p0"、"check"；旗標與目標請放入 args。',
       { runner, script: rawScript },
+    );
+  }
+  if (runner === "script") {
+    return new SmileworkError(
+      "SCRIPT_NOT_ALLOWED",
+      `不允許的 script："${rawScript || "（空白）"}"。`,
+      `script runner 只允許 ${Object.keys(PROJECT_SCRIPTS).join("／")}，分別執行 ${Object.values(PROJECT_SCRIPTS).join("、")}。`,
+      { runner, script: rawScript, allowed: Object.keys(PROJECT_SCRIPTS) },
     );
   }
   return new SmileworkError(
@@ -236,8 +247,8 @@ export async function runVerification(options: RunVerificationOptions): Promise<
     throw new SmileworkError(
       "RUNNER_NOT_SUPPORTED",
       `不支援的驗證 runner：${runnerName || "（空白）"}。`,
-      "改用 bun、npm、pytest、cargo、gradle 或 swift。",
-      { runner: runnerName, supportedRunners: ["bun", "npm", "pytest", "cargo", "gradle", "swift"] },
+      `改用 ${SUPPORTED_RUNNERS.join("、")}。`,
+      { runner: runnerName, supportedRunners: [...SUPPORTED_RUNNERS] },
     );
   }
   const runner = runnerName;
@@ -246,7 +257,16 @@ export async function runVerification(options: RunVerificationOptions): Promise<
   const script = normalizeScript(runner, rawScript);
   if (script === null) throw scriptError(runner, rawScript);
 
-  if (runner === "gradle") {
+  if (runner === "script") {
+    if (args.length > 0) {
+      throw argsNotAllowed(
+        runner,
+        args[0]!,
+        [],
+        "script runner 不接受任何 args；腳本要跑什麼由專案自己的腳本內容決定。",
+      );
+    }
+  } else if (runner === "gradle") {
     const validation = validateGradleArgs(args);
     if (!validation.ok) {
       throw argsNotAllowed(runner, validation.rejectedArg, validation.allowed, validation.message);
@@ -276,6 +296,15 @@ export async function runVerification(options: RunVerificationOptions): Promise<
     const inspection = inspectGradleWrapper(cwd);
     if (!inspection.ok) {
       throw new SmileworkError(inspection.code, inspection.message, inspection.nextAction, { cwd });
+    }
+    executable = inspection.path;
+  } else if (runner === "script") {
+    const inspection = inspectProjectScript(cwd, PROJECT_SCRIPTS[script]!);
+    if (!inspection.ok) {
+      throw new SmileworkError(inspection.code, inspection.message, inspection.nextAction, {
+        cwd,
+        script,
+      });
     }
     executable = inspection.path;
   } else {

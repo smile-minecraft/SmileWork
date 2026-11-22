@@ -11,6 +11,7 @@ import {
   insertEvidence,
   insertWork,
   readWork,
+  withActor,
   withLifecycle,
 } from "./helpers.ts";
 
@@ -599,7 +600,7 @@ describe("work_complete 的錯誤情況", () => {
 });
 
 async function callReviewOnce(context: ToolContext, workId: string): Promise<ToolResult> {
-  return callReview(context, {
+  return callReview(withActor(context, "momus"), {
     id: workId,
     expectedVersion: 1,
     verdict: "approve",

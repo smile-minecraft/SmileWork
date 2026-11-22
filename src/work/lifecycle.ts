@@ -21,16 +21,20 @@ import {
   parseStoredToolResult,
 } from "../shared/stored-json.ts";
 import { nowIso } from "../shared/time.ts";
+import { collectWorkspaceChanges } from "../verify/diff-hygiene.ts";
+import { captureGitWorkspaceState } from "../verify/git-state.ts";
 import { loadWorkContinuity } from "./continuity.ts";
 import {
   evaluateCompletionGates,
   evaluateReviewGates,
   matchAcceptanceResults,
   primaryIssue,
+  requiresServerVerification,
   WORK_ERROR_CODES,
   type DependencyReference,
   type EvidenceReference,
   type GateIssue,
+  type WorkspaceSnapshot,
 } from "./gates.ts";
 
 const COMPLETE_TOOL = "work_complete";
@@ -41,6 +45,11 @@ export interface CompleteWorkInput {
   acceptance: AcceptanceResultItem[];
   note?: string;
   idempotencyKey?: string;
+}
+
+export interface CompleteWorkOptions {
+  /** 專案工作目錄；提供時中高風險工作會檢查證據新鮮度與 diff 衛生。 */
+  projectRoot?: string;
 }
 
 export interface ReviewWorkInput {
@@ -81,6 +90,9 @@ interface EvidenceRow {
   evidenceId: string;
   serverIssued: number;
   exitCode: number | null;
+  summary: string;
+  outputPath: string | null;
+  createdAt: string;
   details: string | null;
 }
 
@@ -193,24 +205,73 @@ function loadWork(db: Database, projectId: string, workId: string): WorkItem | n
   return row ? mapWorkRow(row) : null;
 }
 
-function parseEvidenceTimedOut(details: string | null, evidenceId: string): boolean {
-  const parsed = parseStoredObject(details, { entity: "證據", id: evidenceId, field: "details" });
-  return parsed?.timedOut === true;
+/** details 沒有 treeFingerprint 鍵的是舊證據（undefined）；有鍵但不是字串時視為 null。 */
+function fingerprintFromDetails(details: Record<string, unknown> | null): string | null | undefined {
+  if (!details || !("treeFingerprint" in details)) return undefined;
+  return typeof details.treeFingerprint === "string" ? details.treeFingerprint : null;
 }
 
-function loadEvidence(db: Database, projectId: string, workId: string): EvidenceReference[] {
+/** 依建立順序讀取工作的證據，閘門用最後一筆回報最近的失敗或過期證據。 */
+export function loadEvidenceReferences(
+  db: Database,
+  projectId: string,
+  workId: string,
+): EvidenceReference[] {
   return db
     .query<EvidenceRow, [string, string]>(
-      `SELECT evidence_id AS evidenceId, server_issued AS serverIssued, exit_code AS exitCode, details
-       FROM evidence WHERE project_id = ? AND work_id = ?`,
+      `SELECT evidence_id AS evidenceId, server_issued AS serverIssued, exit_code AS exitCode,
+              summary, output_path AS outputPath, created_at AS createdAt, details
+       FROM evidence WHERE project_id = ? AND work_id = ?
+       ORDER BY created_at, rowid`,
     )
     .all(projectId, workId)
-    .map((row) => ({
-      evidenceId: row.evidenceId,
-      serverIssued: row.serverIssued === 1,
-      exitCode: row.exitCode,
-      timedOut: parseEvidenceTimedOut(row.details, row.evidenceId),
-    }));
+    .map((row) => {
+      const details = parseStoredObject(row.details, {
+        entity: "證據",
+        id: row.evidenceId,
+        field: "details",
+      });
+      return {
+        evidenceId: row.evidenceId,
+        serverIssued: row.serverIssued === 1,
+        exitCode: row.exitCode,
+        timedOut: details?.timedOut === true,
+        treeFingerprint: fingerprintFromDetails(details),
+        summary: row.summary,
+        outputPath: row.outputPath,
+        createdAt: row.createdAt,
+      };
+    });
+}
+
+/**
+ * 擷取閘門需要的工作區事實。git 指令在資料庫交易外執行，避免長時間持有寫入鎖；
+ * 不是 git repo 時 changes 為 null 且 git.isGitRepo 為 false。
+ */
+export function captureWorkspaceSnapshot(
+  projectRoot: string,
+  baseCommit: string | null,
+): WorkspaceSnapshot {
+  const git = captureGitWorkspaceState(projectRoot);
+  if (!git.isGitRepo) return { git, changes: null, changesError: null };
+  try {
+    return { git, changes: collectWorkspaceChanges(projectRoot, baseCommit), changesError: null };
+  } catch (error) {
+    return {
+      git,
+      changes: null,
+      changesError: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function loadBaseCommit(db: Database, projectId: string, workId: string): string | null {
+  const row = db
+    .query<{ base_commit: string | null }, [string, string]>(
+      "SELECT base_commit FROM work_items WHERE work_id = ? AND project_id = ?",
+    )
+    .get(workId, projectId);
+  return row?.base_commit ?? null;
 }
 
 function loadDependencies(db: Database, workId: string): DependencyReference[] {
@@ -385,6 +446,8 @@ function completeWorkInTransaction(
   projectId: string,
   actor: Actor,
   input: CompleteWorkInput,
+  options: CompleteWorkOptions,
+  prepared: WorkspaceSnapshot | null,
 ): ToolResult {
   const requestHash = input.idempotencyKey
     ? sha256Hex(canonicalJson({ ...input, idempotencyKey: undefined }))
@@ -399,11 +462,20 @@ function completeWorkInTransaction(
   if (!work) return workNotFound(input.id);
   if (work.version !== input.expectedVersion) return versionConflict(work);
 
+  let workspace: WorkspaceSnapshot | null = null;
+  if (options.projectRoot !== undefined && requiresServerVerification(work.risk)) {
+    workspace =
+      prepared ??
+      captureWorkspaceSnapshot(options.projectRoot, loadBaseCommit(db, projectId, work.workId));
+  }
+
   const issues = evaluateCompletionGates({
     work,
     acceptance: input.acceptance,
-    evidence: loadEvidence(db, projectId, work.workId),
+    evidence: loadEvidenceReferences(db, projectId, work.workId),
     dependencies: loadDependencies(db, work.workId),
+    workspace,
+    rulings: workspace ? loadWorkContinuity(db, projectId, work.workId).rulings : [],
   });
   const primary = primaryIssue(issues);
   if (primary) return gateFailure(work, issues, primary);
@@ -489,14 +561,38 @@ function completeWorkInTransaction(
   return result;
 }
 
-/** 結案：所有閘門通過後才把工作標成 done，並在同一筆交易寫入事件與冪等紀錄。 */
+function prepareCompletionWorkspace(
+  db: Database,
+  projectId: string,
+  input: CompleteWorkInput,
+  options: CompleteWorkOptions,
+): WorkspaceSnapshot | null {
+  if (options.projectRoot === undefined || db.inTransaction) return null;
+  const row = db
+    .query<{ risk: string | null; base_commit: string | null; version: number }, [string, string]>(
+      "SELECT risk, base_commit, version FROM work_items WHERE work_id = ? AND project_id = ?",
+    )
+    .get(input.id, projectId);
+  if (!row || row.version !== input.expectedVersion) return null;
+  if (!requiresServerVerification(row.risk as RiskLevel | null)) return null;
+  return captureWorkspaceSnapshot(options.projectRoot, row.base_commit);
+}
+
+/**
+ * 結案：所有閘門通過後才把工作標成 done，並在同一筆交易寫入事件與冪等紀錄。
+ * 工作區快照先在交易外擷取；baseCommit 建立後不會變，交易內的版本檢查保證其餘欄位一致。
+ */
 export function completeWork(
   db: Database,
   projectId: string,
   actor: Actor,
   input: CompleteWorkInput,
+  options: CompleteWorkOptions = {},
 ): ToolResult {
-  return withImmediateTransaction(db, () => completeWorkInTransaction(db, projectId, actor, input));
+  const prepared = prepareCompletionWorkspace(db, projectId, input, options);
+  return withImmediateTransaction(db, () =>
+    completeWorkInTransaction(db, projectId, actor, input, options, prepared),
+  );
 }
 
 function reviewWorkInTransaction(
@@ -510,7 +606,12 @@ function reviewWorkInTransaction(
   if (work.version !== input.expectedVersion) return versionConflict(work);
 
   const reviewer = input.reviewer?.trim() || actor.name;
-  const issues = evaluateReviewGates({ work, verdict: input.verdict, reviewer });
+  const issues = evaluateReviewGates({
+    work,
+    verdict: input.verdict,
+    reviewer,
+    actorName: actor.name,
+  });
   const primary = primaryIssue(issues);
   if (primary) return gateFailure(work, issues, primary);
 
