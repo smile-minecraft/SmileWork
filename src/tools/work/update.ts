@@ -31,7 +31,7 @@ const inputSchema = z.object({
   addDependsOn: z.array(z.string().min(1).max(200)).max(100).optional(),
   removeDependsOn: z.array(z.string().min(1).max(200)).max(100).optional(),
   evidence: z.array(evidenceSchema).max(50).optional(),
-  takeover: z.boolean().optional().describe("接手他人進行中的工作"),
+  takeover: z.boolean().optional().describe("接手他人工作"),
   idempotencyKey: z.string().min(1).max(200).optional(),
 });
 
