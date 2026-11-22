@@ -59,4 +59,4 @@ Pi 的 session 紀錄帶有 `cwd`，索引會優先採用它；只有在紀錄�
 
 ## 確認連線
 
-先請 Pi 呼叫一次 `status`，確認 `profile`、資料庫路徑與專案識別碼。接著用 `work_list` 找可做的事，`work_get` 讀取工作，`work_update` 推進狀態，再用 `work_complete` 結案；高風險或需要獨立審查時，先請非 owner 用 `work_review` 記錄 `approve`。
+先請 Pi 呼叫一次 `status`，確認 `profile`、資料庫路徑與專案識別碼。接著用 `work_list` 找可做的事，`work_get` 讀取工作，`work_update` 認領並推進狀態，用 `verify_run` 在目前工作區取得成功的證據後，再送審（`in_progress → review`）與 `work_complete` 結案；中高風險會檢查證據是否仍對應目前工作區，以及 diff 衛生與 `scopePaths`。低風險可直接結案，高風險或需要獨立審查時，先請非 owner 用 `work_review` 記錄 `approve`。

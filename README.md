@@ -2,16 +2,16 @@
 
 SmileWork 是跨代理共用的本機 MCP 伺服器。它透過 stdio 連上 Claude Code、OpenCode、Codex、Pi 等宿主，讓同一個專案的工作、證據、知識與對話索引由同一份資料庫管理。資料保存在 `~/.smilework/`，伺服器本身不呼叫 LLM，也不連網。
 
-目前版本是 0.2.1。用 `bun add -g smilework` 安裝後執行 `smilework`，也可以從原始碼執行。
+目前版本是 0.3.0。用 `bun add -g smilework` 安裝後執行 `smilework`，也可以從原始碼執行。
 
 ## 提供什麼
 
 - 21 個 MCP 工具，分成工作、驗證、狀態、訊號、知識與對話六個領域。
 - 三種工具 profile：`worker` 12 個、`curator` 15 個、`full` 21 個。
-- 工作流程：建立、更新、依賴、可開始清單、審查、結案。非高風險工作可以從 `in_progress` 直接結案；高風險仍要有非 owner 的 `approve` 與伺服器證據。結案會檢查驗收結果、證據與依賴。
+- 工作流程：建立、認領、送審、結案。`in_progress → review` 是中高風險工作的送審步驟，要有目前工作區上成功的 `verify_run` 證據，並通過 diff 衛生與 `scopePaths` 檢查；`work_complete` 對中高風險工作套用相同的新鮮證據與 diff 檢查，低風險維持輕量。高風險仍要有非 owner 的 `approve`。認領後其他代理需 `takeover` 或 `handoff` 才能改寫進行中的工作。
 - 跨代理接續：建立工作時記下 git HEAD，brief 直接列出 `git diff <baseCommit>`；`work_update` 用 `evidence.kind=handoff` 留交接、`kind=ruling` 留決定，換代理接手時看得到。
 - 非 git 專案：以正規化絕對路徑建立專案身分；有舊 `.ultrawork/tasks.json` 時接回原本的 projectId。先在 `X` 建工作後，從 `X/plugins` 開啟會接回同一個專案；`/` 與系統暫存根目錄不會建立路徑專案。`Test-Server-Folia` 這類資料夾不需要額外設定。
-- 伺服器驗證：`verify_run` 只能執行白名單 runner（`bun`、`npm`、`pytest`、`cargo`、`gradle`、`swift`），輸出寫成可追查的伺服器證據。
+- 伺服器驗證：`verify_run` 只能執行白名單 runner（`bun`、`npm`、`pytest`、`cargo`、`gradle`、`swift`）或專案 `script` runner（`scripts/{verify,check,test}.sh`，不接受 args、不經過 shell）。完整輸出寫到 `outputPath`，回應只帶精簡尾端與錯誤重點；證據附上 git 工作區指紋，用來判斷驗證後是否又改了檔案。
 - 知識：寫入前檢查、版本、歷史、還原、退役與升級。知識可以標註 `scopePaths`，`work_get` 產生 brief 時自動帶入相關的 decision／pitfall。
 - 訊號：記錄糾正、失敗、修好、審查退回與教訓。
 - 對話：索引 Claude Code、Codex、OpenCode 與 Pi 的對話紀錄，支援搜尋與讀取。
@@ -152,10 +152,10 @@ Pi 的 `~/.pi/agent/mcp.json`（專案層是 `.pi/mcp.json`）：
 連線成功後，請代理依序呼叫：
 
 1. `work_create`：建立工作，填 `title`、`objective`、`acceptance` 與 `risk`。高風險工作要設 `risk: "high"`。建立時會記下當時的 git HEAD；之後看 brief 就能用 `git diff <baseCommit>` 審查這次修改。
-2. `work_update`：把 `status` 改成 `in_progress`。人工證據可以在這裡用 `evidence` 一起寫入；`evidence.kind=handoff` 留交接（`details` 放 `currentState`、`decisions`、`nextSteps`、`unverified`），`kind=ruling` 留決定（`decision`、`rationale`、`costIfWrong`）。
-3. `verify_run`：指定 `workId`、`runner` 與 `script`，由伺服器執行驗證並建立伺服器證據。例如 `runner: "bun"`、`script: "test"`。
-4. `work_review`：高風險工作或需要獨立審查時使用；由非 owner 的審查者記錄 `approve`、`concerns` 或 `reject`。高風險工作一定要有非 owner 的 `approve`。
-5. `work_complete`：非高風險工作可以從 `in_progress` 直接結案；高風險要在 `review` 狀態、有非 owner 的 `approve` 與伺服器證據。逐項回報驗收結果，`met: true` 的項目要附 `evidenceIds`。缺少驗收、證據或依賴時，結案會失敗並回報原因。
+2. `work_update`：把 `status` 改成 `in_progress`，這一步會把 `owner` 設為呼叫者。人工證據可以在這裡用 `evidence` 一起寫入；`evidence.kind=handoff` 留交接（`details` 放 `currentState`、`decisions`、`nextSteps`、`unverified`），`kind=ruling` 留決定（`decision`、`rationale`、`costIfWrong`）。中高風險工作修改完成後，用 `work_update` 把 `status` 改成 `review` 送審，需有目前工作區上成功的伺服器證據，且通過 diff 衛生與 `scopePaths` 檢查。
+3. `verify_run`：指定 `workId`、`runner` 與 `script`，由伺服器執行驗證並建立伺服器證據。例如 `runner: "bun"`、`script: "test"`；或用 `runner: "script"`、`script: "verify"` 執行專案的 `scripts/verify.sh`。完整輸出在 `outputPath`，回應只帶尾端與錯誤重點。
+4. `work_review`：高風險工作或需要獨立審查時使用；由非 owner 的審查者記錄 `approve`、`concerns` 或 `reject`。高風險工作一定要有非 owner 的 `approve`，呼叫方是 owner 時無法以 `reviewer` 參數冒名。
+5. `work_complete`：逐項回報驗收結果，`met: true` 的項目要附 `evidenceIds`。中高風險工作會再次檢查新鮮的伺服器證據與 diff 衛生；高風險要在 `review` 狀態、有非 owner 的 `approve`。低風險維持輕量，可以從 `in_progress` 直接結案。缺少驗收、證據或依賴時，結案會失敗並回報原因。
 
 完成後用 `work_get` 讀回工作，確認狀態是 `done`、`resolution` 是 `completed`，而且證據都留下紀錄。
 
@@ -222,3 +222,5 @@ bun run build
 - `smilework-export` v1 尚未包含知識的 `scopePaths`；匯出再匯入後會是空陣列。
 - `baseCommit` 存在資料庫與建立事件中，但匯出格式的 work 記錄沒有獨立欄位。
 - Pi 的 session slug 在路徑含連字號時無法無損還原；索引優先使用 session 紀錄裡的 `cwd`。
+- `script` runner 只執行固定的 `scripts/{verify,check,test}.sh`，不會阻止代理修改腳本本身；改動會進入 diff 與 scope 檢查。
+- 測試留下的 untracked 檔案會影響 `treeFingerprint`，清理後重跑驗證才能讓證據對應目前工作區。
