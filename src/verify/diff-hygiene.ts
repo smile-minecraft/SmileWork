@@ -8,6 +8,7 @@
 
 import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { ERROR_CODES, SmileworkError } from "../shared/errors.ts";
 import { isInsideGitWorkTree, readGitHead, runGitText } from "./git-state.ts";
 
 export interface HygieneRule {
@@ -53,6 +54,34 @@ export interface WorkspaceChanges {
   /** 相對於專案根目錄、排序後的改動檔案（含未追蹤檔案）。 */
   files: string[];
   findings: HygieneFinding[];
+  /** 可前進到受信任 upstream merge-base 時，供 stale-base 診斷使用。 */
+  upstreamBase?: UpstreamBaseInfo;
+}
+
+export interface UpstreamBaseInfo {
+  /** 受信任 upstream 與目前 HEAD 的 merge-base。 */
+  baseRef: string;
+  /** 例如 origin/main。 */
+  upstreamRef: string;
+  /** 舊基準到新基準之間由上游帶入的檔案。 */
+  changedFiles: string[];
+  /** 新基準到目前工作區仍被改動的檔案；untracked 檔案不在此清單。 */
+  worktreeChangedFiles: string[];
+}
+
+export interface BaseCommitRefresh {
+  previousBaseCommit: string | null;
+  baseCommit: string;
+  upstreamRef: string;
+  changed: boolean;
+}
+
+export interface StaleBaseSummary {
+  previousBaseRef: string;
+  baseRef: string;
+  upstreamRef: string;
+  scopeViolations: string[];
+  findings: HygieneFinding[];
 }
 
 export interface RulingText {
@@ -66,6 +95,8 @@ export interface DiffHygieneResult {
   scopeViolations: string[];
   exemptedFindings: number;
   exemptedScopeViolations: number;
+  /** 所有阻擋項目都只來自上游時，要求先刷新 baseCommit。 */
+  staleBase?: StaleBaseSummary;
 }
 
 const MAX_SCANNED_FILE_BYTES = 2 * 1024 * 1024;
@@ -159,6 +190,164 @@ function splitNul(output: string): string[] {
   return output.split("\0").filter((entry) => entry.length > 0);
 }
 
+function tryRunGitText(projectRoot: string, args: readonly string[]): string | null {
+  try {
+    return runGitText(projectRoot, args).trim();
+  } catch {
+    return null;
+  }
+}
+
+function resolveCommit(projectRoot: string, ref: string): string | null {
+  const resolved = tryRunGitText(projectRoot, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+  return resolved === "" ? null : resolved;
+}
+
+function isAncestor(projectRoot: string, ancestor: string, descendant: string): boolean {
+  return tryRunGitText(projectRoot, ["merge-base", "--is-ancestor", ancestor, descendant]) !== null;
+}
+
+/** 只接受 remote-tracking 的預設分支，避免把本地 feature branch 當成可信任基準。 */
+function resolveUpstreamRef(projectRoot: string): { fullRef: string; ref: string } | null {
+  let remotes: string[] = [];
+  try {
+    remotes = runGitText(projectRoot, ["remote"])
+      .split("\n")
+      .map((remote) => remote.trim())
+      .filter((remote) => remote.length > 0);
+  } catch {
+    // 沒有 remote 設定時仍允許既有 origin/* tracking refs。
+  }
+
+  const orderedRemotes = ["origin", ...remotes.filter((remote) => remote !== "origin")];
+  const candidates = new Set<string>();
+  for (const remote of orderedRemotes) {
+    const head = tryRunGitText(projectRoot, ["symbolic-ref", "--quiet", `refs/remotes/${remote}/HEAD`]);
+    if (head !== null) candidates.add(head);
+    candidates.add(`refs/remotes/${remote}/main`);
+    candidates.add(`refs/remotes/${remote}/master`);
+  }
+
+  for (const fullRef of candidates) {
+    if (!fullRef.startsWith("refs/remotes/")) continue;
+    if (resolveCommit(projectRoot, fullRef) === null) continue;
+    return { fullRef, ref: fullRef.slice("refs/remotes/".length) };
+  }
+  return null;
+}
+
+/**
+ * 由伺服器計算可前進的審查基準；呼叫端不能指定 commit。
+ * 新基準必須是舊基準的後代，且來自受信任 remote-tracking 分支與 HEAD 的 merge-base。
+ */
+export function computeBaseCommitRefresh(
+  projectRoot: string,
+  baseCommit: string | null,
+): BaseCommitRefresh {
+  if (!isInsideGitWorkTree(projectRoot)) {
+    throw new SmileworkError(
+      ERROR_CODES.notGitRepository,
+      "不是 git repo，無法更新 baseCommit。",
+      "請在 git worktree 內呼叫，或保留原本非 git 的工作流程。",
+    );
+  }
+
+  const upstream = resolveUpstreamRef(projectRoot);
+  if (upstream === null) {
+    throw new SmileworkError(
+      "UPSTREAM_NOT_FOUND",
+      "找不到受信任的 remote-tracking 上游分支。",
+      "確認 repo 已設定 origin/HEAD 或 origin/main／origin/master 這類 refs/remotes/* 預設分支；必要時先 git fetch。",
+    );
+  }
+
+  const head = readGitHead(projectRoot);
+  if (head === null) {
+    throw new SmileworkError(
+      "BASE_COMMIT_UNAVAILABLE",
+      "repo 目前沒有可解析的 HEAD。",
+      "先建立初始 commit，再重新整理工作分支。",
+    );
+  }
+
+  const nextBase = tryRunGitText(projectRoot, ["merge-base", head, upstream.fullRef]);
+  if (nextBase === null || nextBase === "") {
+    throw new SmileworkError(
+      "UPSTREAM_NOT_FOUND",
+      `HEAD 與 ${upstream.ref} 沒有可用的 merge-base。`,
+      "確認分支歷史確實源自受信任上游；若使用不同整合分支，請先整理分支關係。",
+      { upstreamRef: upstream.ref },
+    );
+  }
+
+  let previousBase: string | null = null;
+  if (baseCommit !== null) {
+    if (!COMMIT_PATTERN.test(baseCommit)) {
+      throw new SmileworkError(
+        "BASE_COMMIT_UNAVAILABLE",
+        "工作記錄的 baseCommit 不是有效的 commit 雜湊。",
+        "重新讀取工作；若資料已損壞，請由維護者修正工作紀錄。",
+        { baseCommit },
+      );
+    }
+    previousBase = resolveCommit(projectRoot, baseCommit);
+    if (previousBase === null) {
+      throw new SmileworkError(
+        "BASE_COMMIT_UNAVAILABLE",
+        "工作記錄的 baseCommit 不在這個 repo。",
+        "確認 worktree 與 repo 沒有被 relink 到不同歷史；必要時先由維護者修正工作紀錄。",
+        { baseCommit },
+      );
+    }
+    if (previousBase !== nextBase && !isAncestor(projectRoot, previousBase, nextBase)) {
+      throw new SmileworkError(
+        "BASE_COMMIT_NOT_FORWARD",
+        "上游 merge-base 早於工作目前的 baseCommit，重新整理基準會把範圍往後退。",
+        "先確認本地基準為何領先受信任上游；refreshBaseCommit 只允許把基準往前移。",
+        { baseCommit: previousBase, candidateBaseCommit: nextBase, upstreamRef: upstream.ref },
+      );
+    }
+  }
+
+  return {
+    previousBaseCommit: previousBase,
+    baseCommit: nextBase,
+    upstreamRef: upstream.ref,
+    changed: previousBase !== nextBase,
+  };
+}
+
+function collectUpstreamBaseInfo(projectRoot: string, baseCommit: string): UpstreamBaseInfo | null {
+  try {
+    const refresh = computeBaseCommitRefresh(projectRoot, baseCommit);
+    if (!refresh.changed || refresh.previousBaseCommit === null) return null;
+    const changedFiles = splitNul(
+      runGitText(projectRoot, [
+        "diff",
+        "--name-only",
+        "-z",
+        ...DIFF_FLAGS,
+        refresh.previousBaseCommit,
+        refresh.baseCommit,
+        "--",
+        ".",
+      ]),
+    );
+    const worktreeChangedFiles = splitNul(
+      runGitText(projectRoot, ["diff", "--name-only", "-z", ...DIFF_FLAGS, refresh.baseCommit, "--", "."]),
+    );
+    return {
+      baseRef: refresh.baseCommit,
+      upstreamRef: refresh.upstreamRef,
+      changedFiles: [...new Set(changedFiles)].sort(),
+      worktreeChangedFiles: [...new Set(worktreeChangedFiles)].sort(),
+    };
+  } catch {
+    // stale-base 診斷是 best-effort；沒有可信上游時維持原本的 scope／hygiene 閘門。
+    return null;
+  }
+}
+
 function resolveBase(
   projectRoot: string,
   baseCommit: string | null,
@@ -204,10 +393,14 @@ export function collectWorkspaceChanges(
   const findings = scanUnifiedDiff(diff);
   for (const path of untracked) findings.push(...scanUntrackedFile(projectRoot, path));
 
+  const upstreamBase =
+    base.baseSource === "baseCommit" ? collectUpstreamBaseInfo(projectRoot, base.baseRef) : null;
+
   return {
     ...base,
     files: [...new Set([...changed, ...untracked])].sort(),
     findings,
+    ...(upstreamBase === null ? {} : { upstreamBase }),
   };
 }
 
@@ -255,10 +448,35 @@ export function evaluateDiffHygiene(
   const outOfScope = changes.files.filter((path) => !isPathInScope(path, options.scopePaths));
   const scopeViolations = scopeOverride ? [] : outOfScope;
 
+  let staleBase: StaleBaseSummary | undefined;
+  if (changes.upstreamBase !== undefined) {
+    const upstreamFiles = new Set(changes.upstreamBase.changedFiles);
+    const worktreeFiles = new Set(changes.upstreamBase.worktreeChangedFiles);
+    const isUpstreamOnly = (path: string): boolean =>
+      upstreamFiles.has(path) && !worktreeFiles.has(path);
+    const upstreamScopeViolations = scopeViolations.filter(isUpstreamOnly);
+    const upstreamFindings = findings.filter((finding) => isUpstreamOnly(finding.path));
+    const hasBlockingItems = findings.length > 0 || scopeViolations.length > 0;
+    const allFromUpstream =
+      hasBlockingItems &&
+      upstreamScopeViolations.length === scopeViolations.length &&
+      upstreamFindings.length === findings.length;
+    if (allFromUpstream) {
+      staleBase = {
+        previousBaseRef: changes.baseRef,
+        baseRef: changes.upstreamBase.baseRef,
+        upstreamRef: changes.upstreamBase.upstreamRef,
+        scopeViolations: upstreamScopeViolations,
+        findings: upstreamFindings,
+      };
+    }
+  }
+
   return {
     findings,
     scopeViolations,
     exemptedFindings: changes.findings.length - findings.length,
     exemptedScopeViolations: outOfScope.length - scopeViolations.length,
+    ...(staleBase === undefined ? {} : { staleBase }),
   };
 }

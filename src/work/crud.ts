@@ -18,6 +18,7 @@ import { withImmediateTransaction } from "../db/transaction.ts";
 import { findRelevantKnowledge, type RelevantKnowledge } from "../knowledge/relevant.ts";
 import { isProjectResolutionError } from "../mcp/context.ts";
 import type { ToolContext } from "../mcp/types.ts";
+import { computeBaseCommitRefresh, type BaseCommitRefresh } from "../verify/diff-hygiene.ts";
 import { gitHeadFor } from "../project/git.ts";
 import { canonicalJson } from "../shared/canonical.ts";
 import { ERROR_CODES, SmileworkError } from "../shared/errors.ts";
@@ -55,6 +56,7 @@ export const WORK_ERROR_CODES = {
   invalidTransition: "INVALID_TRANSITION",
   idempotencyConflict: "IDEMPOTENCY_CONFLICT",
   workAlreadyClaimed: "WORK_ALREADY_CLAIMED",
+  baseRefreshNotAllowed: "BASE_REFRESH_NOT_ALLOWED",
 } as const;
 
 /** work_update 回應中每筆證據 output 的字元上限；完整內容留在資料庫，work_get 會回傳。 */
@@ -82,7 +84,7 @@ export interface WorkView {
   dependsOn: string[];
   review: WorkReview | null;
   acceptanceResults: AcceptanceResults | null;
-  /** 建立工作時的 git HEAD；非 git 專案或舊資料為 null。 */
+  /** 工作審查比較基準；建立時為 git HEAD，可用 refreshBaseCommit 前進到上游 merge-base。 */
   baseCommit: string | null;
   version: number;
   createdAt: string;
@@ -396,7 +398,7 @@ export function renderWorkBrief(
   if (work.labels.length > 0) lines.push(`- 標籤：${work.labels.join("、")}`);
   if (work.baseCommit !== null) {
     lines.push(
-      `- 審查範圍：\`git diff ${work.baseCommit}\`（工作建立時的 HEAD ${work.baseCommit.slice(0, 12)}）`,
+      `- 審查範圍：\`git diff ${work.baseCommit}\`（目前比較基準 ${work.baseCommit.slice(0, 12)}；可用 refreshBaseCommit 同步受信任上游的 merge-base）`,
     );
   }
 
@@ -1086,6 +1088,8 @@ export interface UpdateWorkInput {
   parentId?: string | null;
   addDependsOn?: string[];
   removeDependsOn?: string[];
+  /** 由伺服器以受信任 upstream 的 merge-base 前進 baseCommit；不接受任意 commit。 */
+  refreshBaseCommit?: boolean;
   evidence?: EvidenceInput[];
   /** 接手別人已認領（in_progress）的工作；不帶時只有 owner 或附 handoff 才能更新。 */
   takeover?: boolean;
@@ -1136,21 +1140,47 @@ function gateError(current: WorkView, issues: readonly GateIssue[], primary: Gat
   });
 }
 
-/**
- * 送審（in_progress → review）的工作區快照在交易外擷取，避免 git 指令持有寫入鎖。
- * baseCommit 建立後不會變；工作在這段期間被改動時，交易內的版本檢查會擋下。
- */
+/** baseCommit refresh 與送審快照都在交易外執行，避免 git 指令持有 SQLite 寫入鎖。 */
+function prepareBaseCommitRefresh(
+  db: Database,
+  project: ProjectContext,
+  actor: Actor,
+  input: UpdateWorkInput,
+): BaseCommitRefresh | null {
+  if (input.refreshBaseCommit !== true || db.inTransaction) return null;
+  const current = getWorkView(db, project.projectId, input.id);
+  if (!current || current.version !== input.expectedVersion) return null;
+  if (current.status !== "open" && current.status !== "in_progress") return null;
+  const declaredActor = actor.name !== "unknown";
+  const hasHandoff = input.evidence?.some((item) => item.kind === "handoff") === true;
+  if (
+    current.status === "in_progress" &&
+    declaredActor &&
+    current.owner !== actor.name &&
+    !isUnclaimedOwner(current.owner) &&
+    input.takeover !== true &&
+    !hasHandoff
+  ) {
+    return null;
+  }
+  return computeBaseCommitRefresh(project.worktreePath, current.baseCommit);
+}
+
 function prepareReviewSubmission(
   db: Database,
   project: ProjectContext,
   input: UpdateWorkInput,
+  refreshedBaseCommit?: string,
 ): WorkspaceSnapshot | null {
   if (input.status !== "review" || db.inTransaction) return null;
   const current = getWorkView(db, project.projectId, input.id);
   if (!current || current.status !== "in_progress" || current.version !== input.expectedVersion) {
     return null;
   }
-  return captureWorkspaceSnapshot(project.worktreePath, current.baseCommit);
+  return captureWorkspaceSnapshot(
+    project.worktreePath,
+    refreshedBaseCommit ?? current.baseCommit,
+  );
 }
 
 interface MappedEvidence {
@@ -1312,7 +1342,8 @@ export function updateWork(
   actor: Actor,
   input: UpdateWorkInput,
 ): ToolResult {
-  const prepared = prepareReviewSubmission(db, project, input);
+  const baseRefresh = prepareBaseCommitRefresh(db, project, actor, input);
+  const prepared = prepareReviewSubmission(db, project, input, baseRefresh?.baseCommit);
   return runIdempotent(
     db,
     {
@@ -1382,6 +1413,25 @@ export function updateWork(
           }
           status = input.status;
         }
+        if (input.refreshBaseCommit === true) {
+          if (current.status !== "open" && current.status !== "in_progress") {
+            throw new SmileworkError(
+              WORK_ERROR_CODES.baseRefreshNotAllowed,
+              `狀態 ${current.status} 不允許刷新 baseCommit。`,
+              "先把工作轉回 in_progress，再呼叫 work_update（refreshBaseCommit: true）。",
+              { workId: current.id, status: current.status },
+            );
+          }
+          if (baseRefresh === null) {
+            throw new SmileworkError(
+              ERROR_CODES.internal,
+              "無法取得 baseCommit refresh 的伺服器計算結果。",
+              "重新讀取工作後再試一次；若持續失敗，請回報此問題。",
+              { workId: current.id },
+            );
+          }
+        }
+        const effectiveBaseCommit = baseRefresh?.baseCommit ?? current.baseCommit;
         if (status === "cancelled") resolution = "abandoned";
         else if (status !== "done") resolution = null;
 
@@ -1469,7 +1519,7 @@ export function updateWork(
 
         if (status === "review" && current.status === "in_progress") {
           const workspace =
-            prepared ?? captureWorkspaceSnapshot(project.worktreePath, current.baseCommit);
+            prepared ?? captureWorkspaceSnapshot(project.worktreePath, effectiveBaseCommit);
           const rulings = [
             ...loadWorkContinuity(db, project.projectId, input.id).rulings,
             ...continuityItems
@@ -1504,6 +1554,7 @@ export function updateWork(
         if (input.parentId !== undefined) changedFields.push("parentId");
         if (input.addDependsOn !== undefined) changedFields.push("dependsOn");
         if (input.removeDependsOn !== undefined) changedFields.push("dependsOn");
+        if (baseRefresh?.changed === true) changedFields.push("baseCommit");
         if (continuityItems.length > 0) changedFields.push("continuity");
 
         const now = nowIso();
@@ -1525,6 +1576,7 @@ export function updateWork(
             priority,
             risk,
             plan_id: parentId,
+            base_commit: effectiveBaseCommit,
             updated_by: actor.name,
             updated_by_model: actor.model,
           },
@@ -1538,6 +1590,22 @@ export function updateWork(
         }
 
         writeLabels(db, input.id, labels, now);
+
+        if (baseRefresh?.changed === true) {
+          appendEvent(db, {
+            projectId: project.projectId,
+            kind: "base_commit_refreshed",
+            actor,
+            workId: input.id,
+            summary: `審查基準從 ${baseRefresh.previousBaseCommit?.slice(0, 12) ?? "（未記錄）"} 前進到 ${baseRefresh.baseCommit.slice(0, 12)}`,
+            details: {
+              previousBaseCommit: baseRefresh.previousBaseCommit,
+              baseCommit: baseRefresh.baseCommit,
+              upstreamRef: baseRefresh.upstreamRef,
+            },
+            now,
+          });
+        }
 
         for (const item of continuityItems) {
           if (item.kind === "handoff") {
@@ -1607,6 +1675,16 @@ export function updateWork(
           work,
           evidence: evidence.map(compactEvidenceView),
           addedEvidence: addedEvidence.map(compactEvidenceView),
+          ...(input.refreshBaseCommit === true && baseRefresh !== null
+            ? {
+                baseCommitRefresh: {
+                  changed: baseRefresh.changed,
+                  previousBaseCommit: baseRefresh.previousBaseCommit,
+                  baseCommit: baseRefresh.baseCommit,
+                  upstreamRef: baseRefresh.upstreamRef,
+                },
+              }
+            : {}),
         });
       }),
   );

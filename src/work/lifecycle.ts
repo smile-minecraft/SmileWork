@@ -580,7 +580,7 @@ function prepareCompletionWorkspace(
 
 /**
  * 結案：所有閘門通過後才把工作標成 done，並在同一筆交易寫入事件與冪等紀錄。
- * 工作區快照先在交易外擷取；baseCommit 建立後不會變，交易內的版本檢查保證其餘欄位一致。
+ * 工作區快照先在交易外擷取；baseCommit 由帶版本檢查的 work_update 管理，交易內會再確認工作版本。
  */
 export function completeWork(
   db: Database,

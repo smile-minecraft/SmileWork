@@ -151,11 +151,13 @@ Pi 的 `~/.pi/agent/mcp.json`（專案層是 `.pi/mcp.json`）：
 
 連線成功後，請代理依序呼叫：
 
-1. `work_create`：建立工作，填 `title`、`objective`、`acceptance` 與 `risk`。高風險工作要設 `risk: "high"`。建立時會記下當時的 git HEAD；之後看 brief 就能用 `git diff <baseCommit>` 審查這次修改。
+1. `work_create`：建立工作，填 `title`、`objective`、`acceptance` 與 `risk`。高風險工作要設 `risk: "high"`。建立時會記下當時的 git HEAD；之後看 brief 就能用 `git diff <baseCommit>` 審查這次修改。分支前進到新上游後，用 `work_update` 的 `refreshBaseCommit: true` 由伺服器把基準前進到受信任上游的 merge-base，不接受任意 commit。
 2. `work_update`：把 `status` 改成 `in_progress`，這一步會把 `owner` 設為呼叫者。人工證據可以在這裡用 `evidence` 一起寫入；`evidence.kind=handoff` 留交接（`details` 放 `currentState`、`decisions`、`nextSteps`、`unverified`），`kind=ruling` 留決定（`decision`、`rationale`、`costIfWrong`）。中高風險工作修改完成後，用 `work_update` 把 `status` 改成 `review` 送審，需有目前工作區上成功的伺服器證據，且通過 diff 衛生與 `scopePaths` 檢查。
 3. `verify_run`：指定 `workId`、`runner` 與 `script`，由伺服器執行驗證並建立伺服器證據。例如 `runner: "bun"`、`script: "test"`；或用 `runner: "script"`、`script: "verify"` 執行專案的 `scripts/verify.sh`。完整輸出在 `outputPath`，回應只帶尾端與錯誤重點。
 4. `work_review`：高風險工作或需要獨立審查時使用；由非 owner 的審查者記錄 `approve`、`concerns` 或 `reject`。高風險工作一定要有非 owner 的 `approve`，呼叫方是 owner 時無法以 `reviewer` 參數冒名。
 5. `work_complete`：逐項回報驗收結果，`met: true` 的項目要附 `evidenceIds`。中高風險工作會再次檢查新鮮的伺服器證據與 diff 衛生；高風險要在 `review` 狀態、有非 owner 的 `approve`。低風險維持輕量，可以從 `in_progress` 直接結案。缺少驗收、證據或依賴時，結案會失敗並回報原因。
+
+多個寫入型代理請各自使用獨立 worktree，並在該 worktree 完成驗證、送審與結案；共用 worktree 時不要把子工作分別送審。長時間驗證與 worktree 的完整規則見[宿主文件](docs/hosts/README.md#平行代理與-worktree)。
 
 完成後用 `work_get` 讀回工作，確認狀態是 `done`、`resolution` 是 `completed`，而且證據都留下紀錄。
 

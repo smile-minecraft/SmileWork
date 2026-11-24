@@ -31,6 +31,10 @@ OpenCode 從專案的 `opencode.json` 或 `opencode.jsonc` 讀取設定，也可
 
 `command` 的第一個元素要填 `bun` 的絕對路徑。OpenCode 會把 `environment` 疊在目前程序環境之上；這裡設定的值優先。`SMILEWORK_PROJECT` 指向要操作工作的專案資料夾；如果 OpenCode 一定從專案根目錄啟動，可以省略。
 
+平行開發時不要在使用者層設定固定的 `SMILEWORK_PROJECT` 指向主 repo。OpenCode V2 每個專案目錄會啟動自己的 local MCP，省略 `SMILEWORK_PROJECT` 時 cwd 就是該目錄，`scopePaths` 與 `treeFingerprint` 才會落在各自的 worktree。送審與結案也要在同一個 worktree 的 session 執行。
+
+OpenCode V2 的 MCP `execution` timeout 由 `mcp.timeout.execution` 控制；T3 Code 或模型供應商可能另有較短的工具逾時。`verify_run` 自身預設 60 秒、上限 600 秒，大型建置仍建議暖編譯後用 `--filter` 跑模組測試。
+
 存檔後開新工作階段，或用 `opencode mcp list` 確認 `smilework` 的狀態。工具會出現在 `smilework` 這個伺服器名稱底下。
 
 ## 使用者設定
