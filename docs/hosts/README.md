@@ -29,7 +29,7 @@ bun /Users/you/src/SmileWork/src/cli/index.ts mcp
 
 ## 跨代理接續
 
-`work_create` 會記下建立時的 git HEAD，`work_get` 的 brief 會列出 `git diff <baseCommit>`，讓不是作者的代理不用猜審查範圍。
+`work_create` 會記下建立時的 git HEAD，`work_get` 的 brief 會列出 `git diff <baseCommit>`，讓不是作者的代理不用猜審查範圍。分支 merge／rebase 到新的上游後，可用 `work_update` 的 `refreshBaseCommit: true` 讓伺服器把基準前進到受信任 remote-tracking 分支與目前 HEAD 的 merge-base；不接受呼叫端直接指定 commit。更新會寫入 `base_commit_refreshed` 事件並增加工作版本。
 
 `work_update` 可以用 `evidence` 留下交接與決定：
 
@@ -62,6 +62,26 @@ bun /Users/you/src/SmileWork/src/cli/index.ts mcp
 ```
 
 `work_get` 預設帶出最新一份交接與所有決定；brief、`work_review` 與 `work_complete` 的回傳也看得到。知識項目可以用 `scopePaths` 標註適用路徑，brief 會自動列出相關的 decision／pitfall。
+
+### 平行代理與 worktree
+
+送審與結案的 `scopePaths` 檢查，是拿「呼叫端所在 worktree」從 `baseCommit` 以來的整份 diff（含未追蹤且未 ignore 的檔案）比對該工作的範圍。SmileWork 沒有檔案級的工作歸屬，因此多個寫入型代理共用同一個 worktree 時，彼此的改動會互相卡住。
+
+實務上採用 **一個寫入型代理一個 worktree**：
+
+- 同一個 git repo 的 worktree 共用 projectId 與工作板，但各自有不同的 diff 與 `treeFingerprint`。
+- 該 session 的 MCP server 要以自己的 worktree 當 cwd；若設 `SMILEWORK_PROJECT`，也要指向同一個 worktree，不能固定指向主 repo。
+- 送審、結案與 `verify_run` 都要在那個 worktree 執行。不要合併後從主 worktree 代替子工作結案；中高風險會因指紋不同而失敗，低風險可能只看見空 diff。
+- 工作最好在該 worktree 建立。若工作先由主代理建立，子代理認領後應先 `refreshBaseCommit: true`，把基準對齊到自己 worktree 的上游 merge-base。
+- 建置產物（例如 `.build`、`DerivedData`、`.swiftpm`、`*.xcresult`）要加入 `.gitignore`，否則未追蹤產物也會進入 scope 檢查。
+
+若真的要共用 worktree，建議只保留一張主代理的整合工作，不要讓子工作各自送審。`scopePaths` 留空代表不限制；`scope-override` ruling 則會豁免整張工作的所有範圍外檔案，兩者都會削弱範圍檢查。
+
+### 長時間驗證
+
+`verify_run` 是同步 MCP 呼叫：預設 timeout 為 60 秒，伺服器上限為 600 秒（`timeoutMs` 會被 clamp）。呼叫端還可能有自己的工具逾時，實際可用時間取兩者較短者。
+
+大型 Swift 專案建議先在工具外暖編譯，再用 `runner: "swift"`、`script: "test"`、`args: ["--filter", "<改動模組或測試>"]` 取得伺服器證據，並明確設定 `timeoutMs`。Swift runner 目前只支援 test，不能把單獨 build 當成伺服器證據。呼叫端逾時後，server 可能仍在執行並稍後寫入證據；重試前先 `work_get` 確認，避免疊跑兩個編譯。
 
 ### 選擇 profile
 

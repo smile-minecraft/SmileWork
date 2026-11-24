@@ -1,5 +1,17 @@
 # 變更紀錄
 
+## Unreleased
+
+### 新增
+
+- `work_update` 支援 `refreshBaseCommit: true`：由伺服器以受信任 remote-tracking 上游分支與目前 HEAD 的 merge-base 前進審查基準，不接受呼叫端指定任意 commit；更新會記錄 `base_commit_refreshed` 事件並增加工作版本。
+- 送審與結案在範圍或衛生問題全部只來自上游時回 `BASE_BEHIND_UPSTREAM`，附上新舊基準、上游 ref 與受影響檔案，提示先刷新基準。
+
+### 變更
+
+- `work_update` 改為嚴格輸入 schema，未知欄位（包含直接傳 `baseCommit`）回 `VALIDATION_ERROR`，不再默默忽略。
+- 宿主文件補充平行代理的獨立 worktree 規則，以及大型 Swift 驗證的 timeout、暖編譯與 `--filter` 用法。
+
 ## 0.3.0 - 2026-11-23
 
 這個版本把送審與結案的證據閘門收緊，讓改動可追查，並降低多代理同時操作時的資料庫爭用。

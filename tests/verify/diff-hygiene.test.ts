@@ -142,6 +142,42 @@ describe("scopePaths 與 ruling 豁免", () => {
       exemptedScopeViolations: 1,
     });
   });
+
+  test("所有阻擋項目都只來自上游時回 staleBase；工作區又改過就不回", () => {
+    const changes = {
+      baseRef: "old-base",
+      baseSource: "baseCommit" as const,
+      files: ["docs/upstream.md"],
+      findings: [
+        { rule: "ts-ignore", path: "docs/upstream.md", line: 1, snippet: "upstream generated line" },
+      ],
+      upstreamBase: {
+        baseRef: "new-base",
+        upstreamRef: "origin/main",
+        changedFiles: ["docs/upstream.md"],
+        worktreeChangedFiles: [],
+      },
+    };
+    const stale = evaluateDiffHygiene(changes, { scopePaths: ["src/"], rulings: [] });
+    expect(stale.staleBase).toEqual({
+      previousBaseRef: "old-base",
+      baseRef: "new-base",
+      upstreamRef: "origin/main",
+      scopeViolations: ["docs/upstream.md"],
+      findings: changes.findings,
+    });
+
+    const touched = evaluateDiffHygiene(
+      {
+        ...changes,
+        upstreamBase: { ...changes.upstreamBase, worktreeChangedFiles: ["docs/upstream.md"] },
+      },
+      { scopePaths: ["src/"], rulings: [] },
+    );
+    expect(touched.staleBase).toBeUndefined();
+    expect(touched.scopeViolations).toEqual(["docs/upstream.md"]);
+    expect(touched.findings).toHaveLength(1);
+  });
 });
 
 describe("collectWorkspaceChanges", () => {

@@ -95,7 +95,7 @@ const COMPACT_DESCRIPTIONS: Readonly<Record<string, string>> = {
   verify_run:
     "白名單 runner（見 runner 欄位）寫入 serverIssued 證據並關聯 workId；不接受任意 shell。",
   work_update:
-    "更新需 expectedVersion；開工自動設 owner，他人進行中需 takeover／handoff。中高風險送審需 verify_run＋diff hygiene／scopePaths。handoff 用 details，ruling 用 decision／rationale／costIfWrong。",
+    "更新需 expectedVersion；開工認領，他人需 takeover／handoff。中高風險送審需 verify_run＋diff／scope。refreshBaseCommit 同步上游 merge-base。handoff／ruling 用 details。",
   work_complete:
     "驗收／證據／依賴／審查後結案；非高風險可直接結案，中高風險需 verify_run＋diff hygiene／scopePaths，高風險需非 owner approve。",
   work_review:

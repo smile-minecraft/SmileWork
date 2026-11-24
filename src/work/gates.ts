@@ -28,6 +28,7 @@ export const WORK_ERROR_CODES = {
   serverEvidenceStale: "SERVER_EVIDENCE_STALE",
   diffHygieneFailed: "DIFF_HYGIENE_FAILED",
   scopeViolation: "SCOPE_VIOLATION",
+  baseBehindUpstream: "BASE_BEHIND_UPSTREAM",
   dependencyNotDone: "DEPENDENCY_NOT_DONE",
   invalidTransition: "INVALID_TRANSITION",
   idempotencyConflict: "IDEMPOTENCY_CONFLICT",
@@ -105,6 +106,7 @@ const CODE_PRIORITY: Record<string, number> = {
   SERVER_EVIDENCE_STALE: 6,
   DIFF_HYGIENE_FAILED: 6,
   SCOPE_VIOLATION: 6,
+  BASE_BEHIND_UPSTREAM: 6,
   WORK_NOT_FOUND: 7,
   VERSION_CONFLICT: 7,
   IDEMPOTENCY_CONFLICT: 7,
@@ -561,6 +563,27 @@ export function diffHygieneIssues(
   }
 
   const result = evaluateDiffHygiene(workspace.changes, { scopePaths, rulings });
+  if (result.staleBase !== undefined) {
+    const stale = result.staleBase;
+    return [
+      {
+        code: WORK_ERROR_CODES.baseBehindUpstream,
+        message: `審查基準落後受信任上游 ${stale.upstreamRef}；目前 ${stale.scopeViolations.length + stale.findings.length} 個阻擋項目只來自上游。`,
+        nextAction: `用 work_update（refreshBaseCommit: true）把基準前進到 ${stale.upstreamRef} 的 merge-base，再重新送審或結案；若檔案其實被本工作改過，請修正 scopePaths 或記錄 scope-override。`,
+        data: {
+          previousBaseRef: stale.previousBaseRef,
+          baseRef: stale.baseRef,
+          baseSource: workspace.changes.baseSource,
+          upstreamRef: stale.upstreamRef,
+          scopeViolations: stale.scopeViolations.slice(0, MAX_REPORTED_PATHS),
+          scopeViolationsTotal: stale.scopeViolations.length,
+          findings: stale.findings.slice(0, MAX_REPORTED_FINDINGS),
+          findingsTotal: stale.findings.length,
+        },
+      },
+    ];
+  }
+
   const issues: GateIssue[] = [];
   if (result.findings.length > 0) {
     const rules = [...new Set(result.findings.map((finding) => finding.rule))];
